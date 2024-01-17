@@ -1,0 +1,1 @@
+# Light-Encoded Neural Graphics Primitives for Realtime Surface Construction during Colonoscopy
