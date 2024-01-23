@@ -33,8 +33,9 @@ class NerfRenderer(nn):
                  scale=1, # bounding box bounds for xyz/dir 
                  cuda_ray_marching=True,
                  ):
+        super().__init__()
         self.scale = scale
-        # TODO: this is fine for testing, but there should be scale>2 or else only 1 cascade=1 resolution
+        # TODO: this is fine for testing, but there should be scale>1 or else only 1 cascade=1 resolution
         self.cascade = 1 + np.ceil(np.log2(self.scale))
         self.grid_size = grid_size
         self.cuda_ray_marching = cuda_ray_marching
@@ -44,7 +45,7 @@ class NerfRenderer(nn):
         # buffer saves data but unline parameter (no grad but updated by optimizer), it's not updated by optimizer
         self.register_buffer("aabb", self.aabb) 
 
-        # extra state(?) for ray marching in cuda
+        # additional info for ray marching in cuda, maintained as extra state
         if self.cuda_ray_marching: # TODO: try turning this off if doesnt work
             # create cascade of grids at multiple resolutions
             # voxel grid essentially 128x128x128 at each of cascade resolutions
@@ -52,18 +53,49 @@ class NerfRenderer(nn):
             density_bitfield = torch.zeros((self.cascades * self.grid_size**3 // 8)) # store it more efficiently
             self.register_buffer("density_grid", density_grid)
             self.register_buffer("density_bitfield", density_bitfield)
+            self.num_iters_density_update = 0 # perform full update of density if its still first couple iters
 
     def forward(self, **args):
         raise NotImplementedError()
     
     #TODO
     def reset_extra_state(self):
-        pass
+        self.density_grid.zero_()
+        self.num_iters_density_update = 0
 
     #TODO
     @torch.no_grad()
-    def update_extra_state(self):
-        pass
+    def update_extra_state(self, decay=0.95, num_splits=128):
+        if not self.cuda_ray_marching:
+            return
+        # update density grid
+        temp_grid = -1 * torch.ones(self.density_grid.shape)
+        
+        # if less than 16 iters have passed, then do full update, otherwise do partial update
+        if self.num_iters_density_update < 16:
+            # split grid into num_splits tensors
+            x_vals = torch.arange(self.grid_size, dtype=torch.int32, device=self.density_bitfield.device).split(num_splits)
+            y_vals = torch.arange(self.grid_size, dtype=torch.int32, device=self.density_bitfield.device).split(num_splits)
+            z_vals = torch.arange(self.grid_size, dtype=torch.int32, device=self.density_bitfield.device).split(num_splits)
+
+            for x_split in x_vals:
+                for y_split in y_vals:
+                    for z_split in z_vals:
+                        # construct points
+                        # each tensor in meshgrid is values of i^th dim arranged so that all combos of coords can be made w/ n^th dim
+                        xx, yy, zz = torch.meshgrid(x_split, y_split, z_split, indexing='ij') # requires torch>=2
+                        coords = torch.cat([xx.reshape(-1, 1), yy.reshape(-1, 1), zz.reshape(-1, 1)], dim=-1) # [N, 3], in [0, 128)
+                        # indices = morton3D(coords).long() # [N] TODO interleave values of 3 fields for raymarching indices
+                        xyzs = 2 * coords.float() / (self.grid_size - 1) - 1 # [N, 3] in [-1, 1]
+
+                        # cascading
+
+        else:
+            pass
+            
+        
+        self.num_iters_density_update += 1
+
 
     #TODO
     @torch.no_grad()
