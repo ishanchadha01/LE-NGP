@@ -126,12 +126,12 @@ class NerfRenderer(nn):
     def density(self, *args):
         raise NotImplementedError()
     
-    #TODO
+
     def reset_extra_state(self):
         self.density_grid.zero_()
         self.num_iters_density_update = 0
 
-    #TODO
+
     @torch.no_grad()
     def update_extra_state(self, decay=0.95, num_splits=128):
         if not self.cuda_ray_marching:
@@ -203,17 +203,76 @@ class NerfRenderer(nn):
         # TODO could take min of mean density thresh and self.density thresh here
         self.density_bitfield = Packbits.apply(self.density_grid, self.density_threshold, self.density_bitfield)
 
-        ### update step counter
-        total_step = min(16, self.local_step)
-        if total_step > 0:
-            self.mean_count = int(self.step_counter[:total_step, 0].sum().item() / total_step)
-        self.local_step = 0
+        #TODO: could add stepcounters here for mean, local/global step
 
 
     #TODO
     @torch.no_grad()
-    def mark_untrained_grid(self):
-        pass
+    def mark_untrained_grid(self, poses, intrinsic, num_splits=64):
+        # poses: [num_batches, 4, 4]
+        # intrinsic: [3, 3]
+        # Marks untrained regions of grid with -1
+        if not self.cuda_ray:
+            return
+        if isinstance(poses, np.ndarray):
+            poses = torch.from_numpy(poses)
+        num_batches = poses.shape[0]
+        fx, fy, cx, cy = intrinsic # focal lengths and camera center, but this is 3x3 so why does unwrapping like this work?
+
+        # split grid into num_splits tensors
+        x_vals = torch.arange(self.grid_size, dtype=torch.int32, device=self.density_bitfield.device).split(num_splits)
+        y_vals = torch.arange(self.grid_size, dtype=torch.int32, device=self.density_bitfield.device).split(num_splits)
+        z_vals = torch.arange(self.grid_size, dtype=torch.int32, device=self.density_bitfield.device).split(num_splits)
+
+        counts = torch.zeros_like(self.density_grid)
+        poses = poses.to(counts.device)
+
+        for x_split in x_vals:
+            for y_split in y_vals:
+                for z_split in z_vals:
+                    # construct octree binary representation with morton encoding
+                    # each tensor in meshgrid is values of i^th dim arranged so that all combos of coords can be made w/ n^th dim
+                    xx, yy, zz = torch.meshgrid(x_split, y_split, z_split, indexing='ij') # requires torch>=2
+                    coords = torch.cat([xx.reshape(-1, 1), yy.reshape(-1, 1), zz.reshape(-1, 1)], dim=-1) # [N, 3], in [0, 128)
+                    indices = Morton3D.apply(coords).long() # [N]
+                    world_xyzs = (2 * coords.float() / (self.grid_size - 1) - 1).unsqueeze(0) # [1, N, 3] in [-1, 1]
+
+                    # cascading
+                    for cascade in range(self.cascades):
+                        scale = min(2 ** cascade, self.scale)
+                        half_grid_size = scale / self.grid_size
+                        cascade_world_xyzs = world_xyzs * (scale - half_grid_size)
+
+                        # split batch to avoid running out of mem
+                        head = 0
+                        while head < num_batches:
+                            tail = min(head + num_splits, num_batches)
+
+                            #TODO:
+                            # world2cam transform
+                            # poses is c2w, so we need to transpose it
+                            # another transpose is needed for batched matmul, so the final form is without transpose
+                            cam_xyzs = cascade_world_xyzs - poses[head:tail, :3, 3].unsqueeze(1)
+                            cam_xyzs = cam_xyzs @ poses[head:tail, :3, :3] # [num_splits, num_coords, 3]
+                            
+                            # query if point is covered by any camera
+                            mask_z = cam_xyzs[:, :, 2] > 0 # [num_splits, num_coords]
+                            mask_x = torch.abs(cam_xyzs[:, :, 0]) < cx / fx * cam_xyzs[:, :, 2] + half_grid_size * 2
+                            mask_y = torch.abs(cam_xyzs[:, :, 1]) < cy / fy * cam_xyzs[:, :, 2] + half_grid_size * 2
+                            mask = (mask_z & mask_x & mask_y).sum(0).reshape(-1) # [num_coords]
+
+                            # update count 
+                            counts[cascade, indices] += mask
+                            head += num_splits
+    
+        # mark untrained grid as -1
+        self.density_grid[counts == 0] = -1
+
+
+
+
+
+
 
     #TODO
     def render(self):
