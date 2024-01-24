@@ -1,11 +1,8 @@
-#include <cuda.h>
-#include <cuda_fp16.h>
-#include <cuda_runtime.h>
+#include <torch.extension.h>
 
-#include <ATen/cuda/CUDAContext.h>
-#include <torch/torch.h>
+#include "include/morton3D.h"
 
-#include <cstdio>
-#include <stdint.h>
-#include <stdexcept>
-#include <limits>
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("morton3D", &morton3D, "morton3D (CUDA)");
+    m.def("invert_morton3D", &morton3D_invert, "morton3D_invert (CUDA)");
+}

@@ -21,6 +21,7 @@ nvcc_flags = [
     '-U__CUDA_NO_HALF_OPERATORS__', '-U__CUDA_NO_HALF_CONVERSIONS__', '-U__CUDA_NO_HALF2_OPERATORS__',
 ]
 c_flags = ['-O3', '-std=c++14'] # different on windows
+include_dirs = [os.path.join(os.path.dirname(_src_path), 'include')]
 setup(
     name='cpp_backend', # package name, import this to use python API
     ext_modules=[
@@ -33,7 +34,8 @@ setup(
             extra_compile_args={
                 'cxx': c_flags,
                 'nvcc': nvcc_flags,
-            }
+            },
+            include_dirs=include_dirs
         ),
     ],
     cmdclass={
