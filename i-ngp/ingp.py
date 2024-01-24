@@ -5,8 +5,11 @@ import numpy as np
 import tinycudann as tcnn
 from torch.autograd import Function
 from torch.cuda.amp import custom_bwd, custom_fwd 
+
 import os
 from tqdm import tqdm
+
+import _cpp_backend
 
 
 class TruncExp(Function):
@@ -25,6 +28,42 @@ class TruncExp(Function):
         x = ctx.saved_tensors[0]
         return dL_dout * torch.exp(x.clamp(-15, 15))
 
+
+class Morton3D(Function):
+    '''
+    Interleave bits of grid using z-curve for easy lookup with divide and conquer octree method, CUDA impl
+    Args:
+        coords: [num_coords, 3], int32, in [0, 128) (for some reason there is no uint32 tensor in torch...) 
+        TODO: check if the coord range is valid! (current 128 is safe)
+    Returns:
+        indices: [num_coords], int32, in [0, 128^3)
+    '''
+    @staticmethod
+    def forward(ctx, coords):
+        if not coords.is_cuda():
+            coords = coords.cuda()
+        num_coords = coords.shape[0]
+        indices = torch.empty(num_coords, dtype=torch.int32, device=coords.device)
+        _cpp_backend.morton3D(coords.int(), num_coords, indices)
+        return indices
+
+
+class InverseMorton3D(Function):
+    '''
+    Invert morton 3d, CUDA impl
+    Args:
+        indices: [num_coords], int32, in [0, 128^3)
+    Returns:
+        coords: [num_coords, 3], int32, in [0, 128)
+    '''
+    @staticmethod
+    def forward(ctx, indices):
+        if not indices.is_cuda():
+            indices = indices.cuda()
+        num_coords = indices.shape[0]
+        coords = torch.empty(num_coords, 3, dtype=torch.int32, device=indices.device)
+        _cpp_backend.invert_morton3D(indices.int(), num_coords, coords)
+        return coords
 
 
 class NerfRenderer(nn):
