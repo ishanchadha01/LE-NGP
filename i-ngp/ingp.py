@@ -75,7 +75,7 @@ class NerfRenderer(nn):
         super().__init__()
         self.scale = scale
         # TODO: this is fine for testing, but there should be scale>1 or else only 1 cascade=1 resolution
-        self.cascade = 1 + np.ceil(np.log2(self.scale))
+        self.cascades = 1 + np.ceil(np.log2(self.scale)) # power of 2 range, eg self.scale=8 gives 4 cascades, [1,2,4,8]
         self.grid_size = grid_size
         self.cuda_ray_marching = cuda_ray_marching
 
@@ -94,7 +94,10 @@ class NerfRenderer(nn):
             self.register_buffer("density_bitfield", density_bitfield)
             self.num_iters_density_update = 0 # perform full update of density if its still first couple iters
 
-    def forward(self, **args):
+    def forward(self, *args):
+        raise NotImplementedError()
+    
+    def density(self, *args):
         raise NotImplementedError()
     
     #TODO
@@ -120,19 +123,54 @@ class NerfRenderer(nn):
             for x_split in x_vals:
                 for y_split in y_vals:
                     for z_split in z_vals:
-                        # construct points
+                        # construct octree binary representation with morton encoding
                         # each tensor in meshgrid is values of i^th dim arranged so that all combos of coords can be made w/ n^th dim
                         xx, yy, zz = torch.meshgrid(x_split, y_split, z_split, indexing='ij') # requires torch>=2
                         coords = torch.cat([xx.reshape(-1, 1), yy.reshape(-1, 1), zz.reshape(-1, 1)], dim=-1) # [N, 3], in [0, 128)
-                        # indices = morton3D(coords).long() # [N] TODO interleave values of 3 fields for raymarching indices
-                        xyzs = 2 * coords.float() / (self.grid_size - 1) - 1 # [N, 3] in [-1, 1]
+                        indices = Morton3D.apply(coords).long() # [num_coords] interleave values of 3 fields for raymarching indices
+                        xyzs = 2 * coords.float() / (self.grid_size - 1) - 1 # [num_coords, 3], change range of xyz to [-1, 1]
 
-                        # cascading
+                        # cascading at multiple resolutions
+                        for cascade in self.cascades:
+                            scale = min(self.scale, 2**cascade)
+                            half_grid_size = self.scale / self.grid_size
+                            cascade_xyzs = xyzs * (scale - half_grid_size) # scale to current cascades resolution
+                            cascade_xyzs += (torch.rand_like(cascade_xyzs) * 2 - 1) * half_grid_size # add noise in [-half grid size, half grid size]
+
+                            # query density net to get depths
+                            sigmas = self.density(cascade_xyzs)['sigmas'].reshape(-1).detach()
+                            sigmas *= self.density_scale
+                            temp_grid[cascade, indices] = sigmas # assign in new hash grid[cascade] for this resolution
 
         else:
-            pass
-            
-        
+            # partial update
+            num_coords = self.grid_size ** 3 // 4 # grid_size**3 / 4
+            for cascade in self.cascades:
+                # randomly sample few positions
+                coords = torch.randint(0, self.grid_size, (num_coords, 3), device=self.density_bitfield.device) # [num_coords, 3], in [0, 128)
+                indices = Morton3D.apply(coords).long() # [num_coords]
+                # randomly sample occupied positions
+                occupied_indices = torch.nonzero(self.density_grid[cascade] > 0).squeeze(-1) # [num_coords * z]
+                rand_mask = torch.randint(0, occupied_indices.shape[0], [num_coords], dtype=torch.long, device=self.density_bitfield.device)
+                occupied_indices = occupied_indices[rand_mask] # [num_coords * z] --> [num_coords], allow for duplication
+                occupied_coords = InverseMorton3D.apply(occupied_indices) # [num_coords, 3], decompressed from octree morton encoding
+                # concatenate, allowing for duplication with previous random sample since it has both occupied/unoccupied
+                indices = torch.cat([indices, occupied_indices], dim=0)
+                coords = torch.cat([coords, occupied_coords], dim=0)
+
+                # below is same as full update
+                xyzs = 2 * coords.float() / (self.grid_size - 1) - 1 # [num_coords, 3], change range of xyz to [-1, 1]
+                scale = min(self.scale, 2**cascade)
+                half_grid_size = self.scale / self.grid_size
+                cascade_xyzs = xyzs * (scale - half_grid_size)
+                cascade_xyzs += (torch.rand_like(cascade_xyzs) * 2 - 1) * half_grid_size
+                sigmas = self.density(cascade_xyzs)['sigmas'].reshape(-1).detach()
+                sigmas *= self.density_scale
+                temp_grid[cascade, indices] = sigmas
+
+        # ema update, select max between decayed current grid and new temp grid
+        valid_mask = (self.density_grid >= 0) & (temp_grid >= 0)
+        self.density_grid[valid_mask] = torch.maximum(self.density_grid[valid_mask] * decay, temp_grid[valid_mask])
         self.num_iters_density_update += 1
 
 
@@ -230,8 +268,8 @@ class INGP(NerfRenderer):
         x = (x-self.xyz_min)/(self.xyz_max-self.xyz_min) # change range from [-scale, scale] to [0, scale]
         x = self.xyz_encoder(x)
         h = self.sigma_net(x)
-        sigmas = TruncExp.apply(sigmas[:, 0])
-        geometric_features = sigmas[:, 1:]
+        sigmas = TruncExp.apply(h[:, 0])
+        geometric_features = h[:, 1:]
 
         # Compute colors from rgb net
         d = d/torch.norm(d, dim=1, keepdim=True) # normalize direction
@@ -241,6 +279,28 @@ class INGP(NerfRenderer):
         rgbs = torch.sigmoid(h) # sigmoid activation for rgb
 
         return sigmas, rgbs
+
+
+    def density(self, x):
+        """
+        Inputs:
+            x: (N, 3) xyz in [-scale, scale]
+
+        Outputs:
+            sigmas: (N), separated into sigmas and geometric features
+        """
+
+        # Compute densities from sigma net
+        x = (x-self.xyz_min)/(self.xyz_max-self.xyz_min) # change range from [-scale, scale] to [0, scale]
+        x = self.xyz_encoder(x)
+        h = self.sigma_net(x)
+        sigmas = TruncExp.apply(h[:, 0])
+        geometric_features = h[:, 1:]
+        return {
+            "sigmas": sigmas,
+            "geometric_features": geometric_features
+        }
+
 
     # optimizer utils
     def get_params(self, lr):
@@ -344,8 +404,8 @@ class LENGP(NerfRenderer):
         x = (x-self.xyz_min)/(self.xyz_max-self.xyz_min) # change range from [-scale, scale] to [0, scale]
         x = self.xyz_encoder(x)
         h = self.sigma_net(x)
-        sigmas = TruncExp.apply(sigmas[:, 0])
-        geometric_features = sigmas[:, 1:]
+        sigmas = TruncExp.apply(h[:, 0])
+        geometric_features = h[:, 1:]
 
         # Compute colors from rgb net
         d = d/torch.norm(d, dim=1, keepdim=True) # normalize direction
@@ -355,6 +415,28 @@ class LENGP(NerfRenderer):
         rgbs = torch.sigmoid(h) # sigmoid activation for rgb
 
         return sigmas, rgbs
+    
+
+    def density(self, x):
+        """
+        Inputs:
+            x: (N, 3) xyz in [-scale, scale]
+
+        Outputs:
+            sigmas: (N), separated into sigmas and geometric features
+        """
+
+        # Compute densities from sigma net
+        x = (x-self.xyz_min)/(self.xyz_max-self.xyz_min) # change range from [-scale, scale] to [0, scale]
+        x = self.xyz_encoder(x)
+        h = self.sigma_net(x)
+        sigmas = TruncExp.apply(h[:, 0])
+        geometric_features = h[:, 1:]
+        return {
+            "sigmas": sigmas,
+            "geometric_features": geometric_features
+        }
+
 
     # optimizer utils
     def get_params(self, lr):
@@ -370,7 +452,6 @@ class LENGP(NerfRenderer):
         return params
     
     
-
 
 #TODO
 class NerfDataset():
