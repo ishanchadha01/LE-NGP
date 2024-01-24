@@ -66,11 +66,36 @@ class InverseMorton3D(Function):
         return coords
 
 
+class Packbits(Function):
+    @staticmethod
+    @custom_fwd(cast_inputs=torch.float32)
+    def forward(ctx, grid, thresh, bitfield=None):
+        '''
+        Pack up the density grid into a bit field to accelerate ray marching, cuda impl
+        Args:
+            grid: float, [num_cascades, grid_size ** 3], assume H % 2 == 0
+            thresh: float, threshold
+        Returns:
+            bitfield: uint8, [num_cascades, grid_size ** 3 / 8]
+        '''
+        if not grid.is_cuda: 
+            grid = grid.cuda()
+        grid = grid.contiguous()
+        num_cascades = grid.shape[0]
+        H3 = grid.shape[1] # grid size cubed
+        num_entries = num_cascades * H3 // 8 # num entries across all hashes
+        if bitfield is None:
+            bitfield = torch.empty(num_entries, dtype=torch.uint8, device=grid.device)
+        _cpp_backend.packbits(grid, num_entries, thresh, bitfield)
+        return bitfield
+
+
 class NerfRenderer(nn):
     def __init__(self,
                  grid_size=128,
                  scale=1, # bounding box bounds for xyz/dir 
                  cuda_ray_marching=True,
+                 density_threshold=0.01,
                  ):
         super().__init__()
         self.scale = scale
@@ -78,6 +103,7 @@ class NerfRenderer(nn):
         self.cascades = 1 + np.ceil(np.log2(self.scale)) # power of 2 range, eg self.scale=8 gives 4 cascades, [1,2,4,8]
         self.grid_size = grid_size
         self.cuda_ray_marching = cuda_ray_marching
+        self.density_threshold = density_threshold
 
         # create axis-aligned bounding box (xmin, xmax, ymin, ymax, zmin, zmax)
         self.aabb = torch.tensor([-1, 1, -1, 1, -1, 1])
@@ -172,6 +198,16 @@ class NerfRenderer(nn):
         valid_mask = (self.density_grid >= 0) & (temp_grid >= 0)
         self.density_grid[valid_mask] = torch.maximum(self.density_grid[valid_mask] * decay, temp_grid[valid_mask])
         self.num_iters_density_update += 1
+
+        # convert to bitfield
+        # TODO could take min of mean density thresh and self.density thresh here
+        self.density_bitfield = Packbits.apply(self.density_grid, self.density_threshold, self.density_bitfield)
+
+        ### update step counter
+        total_step = min(16, self.local_step)
+        if total_step > 0:
+            self.mean_count = int(self.step_counter[:total_step, 0].sum().item() / total_step)
+        self.local_step = 0
 
 
     #TODO

@@ -90,3 +90,43 @@ void invert_morton3D(const at::Tensor indices, const uint32_t N, at::Tensor coor
     static constexpr uint32_t N_THREAD = 128;
     kernel_morton3D_invert<<<div_round_up(N, N_THREAD), N_THREAD>>>(indices.data_ptr<int>(), N, coords.data_ptr<int>());
 }
+
+
+// grid: float, [C, H, H, H]
+// N: int, C * H * H * H / 8
+// density_thresh: float
+// bitfield: uint8, [N]
+template <typename scalar_t>
+__global__ void kernel_packbits(
+    const scalar_t * __restrict__ grid,
+    const uint32_t N,
+    const float density_thresh,
+    uint8_t * bitfield
+) {
+    // parallel per byte
+    const uint32_t n = threadIdx.x + blockIdx.x * blockDim.x;
+    if (n >= N) return;
+
+    // locate
+    grid += n * 8;
+
+    uint8_t bits = 0;
+
+    #pragma unroll
+    for (uint8_t i = 0; i < 8; i++) {
+        bits |= (grid[i] > density_thresh) ? ((uint8_t)1 << i) : 0;
+    }
+
+    bitfield[n] = bits;
+}
+
+
+void packbits(const at::Tensor grid, const uint32_t N, const float density_thresh, at::Tensor bitfield) {
+
+    static constexpr uint32_t N_THREAD = 128;
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+    grid.scalar_type(), "packbits", ([&] {
+        kernel_packbits<<<div_round_up(N, N_THREAD), N_THREAD>>>(grid.data_ptr<scalar_t>(), N, density_thresh, bitfield.data_ptr<uint8_t>());
+    }));
+}
