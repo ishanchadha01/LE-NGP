@@ -90,12 +90,18 @@ class Packbits(Function):
         return bitfield
 
 
+#TODO
+class RayIntersection(Function):
+    pass
+
+
 class NerfRenderer(nn):
     def __init__(self,
                  grid_size=128,
                  scale=1, # bounding box bounds for xyz/dir 
                  cuda_ray_marching=True,
                  density_threshold=0.01,
+                 min_near=0.2 # lower bound for starting point for ray marching from ray origin
                  ):
         super().__init__()
         self.scale = scale
@@ -206,13 +212,12 @@ class NerfRenderer(nn):
         #TODO: could add stepcounters here for mean, local/global step
 
 
-    #TODO
     @torch.no_grad()
     def mark_untrained_grid(self, poses, intrinsic, num_splits=64):
         # poses: [num_batches, 4, 4]
         # intrinsic: [3, 3]
         # Marks untrained regions of grid with -1
-        if not self.cuda_ray:
+        if not self.cuda_ray_marching:
             return
         if isinstance(poses, np.ndarray):
             poses = torch.from_numpy(poses)
@@ -269,18 +274,29 @@ class NerfRenderer(nn):
         self.density_grid[counts == 0] = -1
 
 
+    def render(self, rays_o, rays_d):
+        # rays_o, rays_d: [num_batches, num_rays, 3]
+        # return: rgb_prds: [num_batches, num_rays, 3]
+        if self.cuda_ray_marching:
+            return self.run_cuda(rays_o, rays_d)
+        else:
+            return self.run(rays_o, rays_d) #TODO could also used staged computation if without cuda
 
-
-
-
-
-    #TODO
-    def render(self):
-        pass
 
     #TODO
     def run(self):
-        pass
+        # rays_o, rays_d: [num_batches, num_rays, 3], assume num_batches is 1 TODO why?
+        # bg_color: [3] in range [0, 1]
+        # return: image: [num_batches, num_rays, 3], depth: [num_batches, num_rays]
+        rays_o = rays_o.contiguous().view(-1, 3) # make rays_o contiguous in memory, and shape it into (N*B, 3)
+        rays_d = rays_d.contiguous().view(-1, 3) # same as above
+        num_rays = rays_o.shape[0] # num_rays = num_batches * num_rays since B=1
+        device = rays_o.device
+        
+        # near distance is where ray marching starts, far is where it decides to terminate
+        nears, fars = RayIntersection.apply(rays_o, rays_d, self.aabb, self.min_near) #TODO
+        nears.unsqueeze_(-1)
+        fars.unsqueeze_(-1)
 
     #TODO
     def run_cuda(self):
