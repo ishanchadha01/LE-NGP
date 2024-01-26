@@ -1,6 +1,7 @@
 {
     "files.associations": {
         "stdexcept": "cpp",
-        "cstdint": "cpp"
+        "cstdint": "cpp",
+        "random": "cpp"
     }
 }

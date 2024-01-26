@@ -40,7 +40,7 @@ class Morton3D(Function):
     '''
     @staticmethod
     def forward(ctx, coords):
-        if not coords.is_cuda():
+        if not coords.is_cuda:
             coords = coords.cuda()
         num_coords = coords.shape[0]
         indices = torch.empty(num_coords, dtype=torch.int32, device=coords.device)
@@ -58,7 +58,7 @@ class InverseMorton3D(Function):
     '''
     @staticmethod
     def forward(ctx, indices):
-        if not indices.is_cuda():
+        if not indices.is_cuda:
             indices = indices.cuda()
         num_coords = indices.shape[0]
         coords = torch.empty(num_coords, 3, dtype=torch.int32, device=indices.device)
@@ -90,9 +90,30 @@ class Packbits(Function):
         return bitfield
 
 
-#TODO
 class RayIntersection(Function):
-    pass
+    @staticmethod
+    @custom_fwd(cast_inputs=torch.float32)
+    def forward(ctx, rays_o, rays_d, aabb, min_near=0.2):
+        ''' 
+        Find near and far bounds of ray intersection with aabb, cuda impl
+        Args:
+            rays_o: float, [num_rays, 3]
+            rays_d: float, [num_rays, 3]
+            aabb: float, [6], (xmin, xmax, ymin, ymax, zmin, zmax)
+            min_near: float, scalar
+        Returns:
+            nears: float, [num_rays]
+            fars: float, [num_rays]
+        '''
+        if not rays_o.is_cuda:
+            rays_o = rays_o.cuda()
+        rays_o = rays_o.contiguous().view(-1, 3) # make rays_o contiguous in memory, and shape it into (N*B, 3)
+        rays_d = rays_d.contiguous().view(-1, 3) # same as above
+        num_rays = rays_o.shape[0]
+        nears = torch.empty(num_rays, dtype=rays_o.dtype, device=rays_o.device)
+        fars = torch.empty(num_rays, dtype=rays_o.dtype, device=rays_o.device)
+        _cpp_backend.ray_intersection(rays_o, rays_d, aabb, num_rays, min_near, nears, fars)
+        return nears, fars
 
 
 class NerfRenderer(nn):
