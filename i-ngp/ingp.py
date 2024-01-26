@@ -12,6 +12,11 @@ from tqdm import tqdm
 import _cpp_backend
 
 
+#TODO
+def sample_pdf(bins, weights, n_samples, det=False):
+    pass
+
+
 class TruncExp(Function):
     '''
     Custom function for truncating exp to [-15, 15] for fp32 to ensure numerical stability
@@ -304,11 +309,11 @@ class NerfRenderer(nn):
             return self.run(rays_o, rays_d) #TODO could also used staged computation if without cuda
 
 
-    #TODO
-    def run(self):
+    def run(self, rays_o, rays_d, num_steps=128, upsample_steps=128):
         # rays_o, rays_d: [num_batches, num_rays, 3], assume num_batches is 1 TODO why?
         # bg_color: [3] in range [0, 1]
         # return: image: [num_batches, num_rays, 3], depth: [num_batches, num_rays]
+        prefix = rays_o.shape[:-1] # image dims
         rays_o = rays_o.contiguous().view(-1, 3) # make rays_o contiguous in memory, and shape it into (N*B, 3)
         rays_d = rays_d.contiguous().view(-1, 3) # same as above
         num_rays = rays_o.shape[0] # num_rays = num_batches * num_rays since B=1
@@ -318,6 +323,91 @@ class NerfRenderer(nn):
         nears, fars = RayIntersection.apply(rays_o, rays_d, self.aabb, self.min_near) #TODO
         nears.unsqueeze_(-1)
         fars.unsqueeze_(-1)
+
+        # collect num_steps samples
+        z_vals = torch.linspace(0.0, 1.0, num_steps, device=device).unsqueeze(0) # [1, num_steps]
+        z_vals = z_vals.expand((num_rays, num_steps)) # [num_rays, num_steps]
+        z_vals = nears + (fars - nears) * z_vals # [num_rays, num_steps], in [nears, fars]
+
+        # TODO could add noise to z vals
+
+        # generate xyzs
+        xyzs = rays_o.unsqueeze(-2) + rays_d.unsqueeze(-2) * z_vals.unsqueeze(-1) # [num_rays, 1, 3] + [num_rays, 1, 3] * [num_rays, num_steps, 1] -> [num_rays, num_steps, 3] with broadcasting
+        xyzs = torch.min(torch.max(xyzs, self.aabb[:3]), self.aabb[3:]) # manually clip
+
+        # TODO for debugging, could plot pointcloud here
+        density_outputs = self.density(xyzs.reshape(-1, 3))
+
+        # since we get sigmas and geometric features
+        for k, v in density_outputs.items():
+            density_outputs[k] = v.view(num_rays, num_steps, -1) # view is essentially in place reshape
+        
+        # upsample, like in nerf
+        sample_dist = (fars - nears) / num_steps
+        if upsample_steps > 0:
+            with torch.no_grad():
+                deltas = z_vals[..., 1:] - z_vals[..., :-1] # [num_rays, num_steps-1]
+                deltas = torch.cat([deltas, sample_dist * torch.ones_like(deltas[..., :1])], dim=-1) # elementwise difference in sampled distances along rays
+                alphas = 1 - torch.exp(-deltas * self.density_scale * density_outputs['sigma'].squeeze(-1)) # [num_rays, num_steps], exponential weighting assigment to reduce importance of far away weights
+                alphas_shifted = torch.cat([torch.ones_like(alphas[..., :1]), 1 - alphas + 1e-15], dim=-1) # [num_rays, num_steps+1]
+                weights = alphas * torch.cumprod(alphas_shifted, dim=-1)[..., :-1] # [num_rays, num_steps], final weighting assignment
+
+                # sample new z_vals
+                z_vals_mid = (z_vals[..., :-1] + 0.5 * deltas[..., :-1]) # [num_rays, num_steps-1]
+                new_z_vals = sample_pdf(z_vals_mid, weights[:, 1:-1], upsample_steps, det=not self.training).detach() # [num_rays, num_step_samples]
+                new_xyzs = rays_o.unsqueeze(-2) + rays_d.unsqueeze(-2) * new_z_vals.unsqueeze(-1) # [num_rays, 1, 3] + [num_rays, 1, 3] * [num_rays, num_step_samples, 1] -> [num_rays, num_step_samples, 3], with broadcasting
+                new_xyzs = torch.min(torch.max(new_xyzs, self.aabb[:3]), self.aabb[3:]) # manually clip
+
+            # only forward new points to save computation
+            new_density_outputs = self.density(new_xyzs.reshape(-1, 3))
+            for k, v in new_density_outputs.items():
+                new_density_outputs[k] = v.view(num_rays, upsample_steps, -1)
+
+            # re-order
+            z_vals = torch.cat([z_vals, new_z_vals], dim=1) # [num_rays, sampled_z_vals+z_vals (same as num_steps+sampled_num_steps)]
+            z_vals, z_index = torch.sort(z_vals, dim=1)
+            xyzs = torch.cat([xyzs, new_xyzs], dim=1) # [num_rays, sampled_z_vals+z_vals, 3]
+            xyzs = torch.gather(xyzs, dim=1, index=z_index.unsqueeze(-1).expand_as(xyzs))
+            for k in density_outputs:
+                temp_output = torch.cat([density_outputs[k], new_density_outputs[k]], dim=1)
+                density_outputs[k] = torch.gather(temp_output, dim=1, index=z_index.unsqueeze(-1).expand_as(temp_output))
+            # end upsampling
+
+        deltas = z_vals[..., 1:] - z_vals[..., :-1] # [num_rays, sampled_z_vals+z_vals-1]
+        deltas = torch.cat([deltas, sample_dist * torch.ones_like(deltas[..., :1])], dim=-1)
+        alphas = 1 - torch.exp(-deltas * self.density_scale * density_outputs['sigma'].squeeze(-1)) # [num_rays, sampled_z_vals+z_vals]
+        alphas_shifted = torch.cat([torch.ones_like(alphas[..., :1]), 1 - alphas + 1e-15], dim=-1) # [num_rays, sampled_z_vals+z_vals+1]
+        weights = alphas * torch.cumprod(alphas_shifted, dim=-1)[..., :-1] # [num_rays, sampled_z_vals+z_vals]
+
+        dirs = rays_d.view(-1, 1, 3).expand_as(xyzs)
+        for k, v in density_outputs.items():
+            density_outputs[k] = v.view(-1, v.shape[-1])
+
+        mask = weights > 1e-4 # TODO hard coded
+        rgbs = self.color(xyzs.reshape(-1, 3), dirs.reshape(-1, 3), mask=mask.reshape(-1), **density_outputs)
+        rgbs = rgbs.view(N, -1, 3) # [num_rays, sampled_z_vals+z_vals, 3]
+
+        # calculate weight_sum (mask)
+        weights_sum = weights.sum(dim=-1) # [num_rays]
+        
+        # calculate depth 
+        ori_z_vals = ((z_vals - nears) / (fars - nears)).clamp(0, 1) # normalized version of original z samples
+        depth = torch.sum(weights * ori_z_vals, dim=-1)
+
+        # calculate color
+        image = torch.sum(weights.unsqueeze(-1) * rgbs, dim=-2) # [N, 3], in [0, 1]
+
+        bg_color = 1 #TODO: could randomize background color, this is done in paper!
+
+        image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
+        image = image.view(*prefix, 3)
+        depth = depth.view(*prefix)
+        return {
+            'depth': depth,
+            'image': image,
+            'weights_sum': weights_sum,
+        }
+
 
     #TODO
     def run_cuda(self):
