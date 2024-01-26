@@ -320,7 +320,7 @@ class NerfRenderer(nn):
         device = rays_o.device
         
         # near distance is where ray marching starts, far is where it decides to terminate
-        nears, fars = RayIntersection.apply(rays_o, rays_d, self.aabb, self.min_near) #TODO
+        nears, fars = RayIntersection.apply(rays_o, rays_d, self.aabb, self.min_near)
         nears.unsqueeze_(-1)
         fars.unsqueeze_(-1)
 
@@ -410,8 +410,86 @@ class NerfRenderer(nn):
 
 
     #TODO
-    def run_cuda(self):
-        pass
+    def run_cuda(self, rays_o, rays_d, max_steps=1024):
+        # rays_o, rays_d: [num_batches, num_rays, 3], assume num_batches is 1 TODO why?
+        # bg_color: [3] in range [0, 1]
+        # return: image: [num_batches, num_rays, 3], depth: [num_batches, num_rays]
+        prefix = rays_o.shape[:-1]
+        rays_o = rays_o.contiguous().view(-1, 3)
+        rays_d = rays_d.contiguous().view(-1, 3)
+        num_rays = rays_o.shape[0] # num_rays = num_batches * num_rays since B=1
+        device = rays_o.device
+        
+        # near distance is where ray marching starts, far is where it decides to terminate
+        nears, fars = RayIntersection.apply(rays_o, rays_d, self.aabb, self.min_near)
+
+        bg_color = 1 #TODO: could randomize background color, this is done in paper!
+
+        results = {}
+        if self.training:
+            # setup counter
+            counter = self.step_counter[self.local_step % 16]
+            counter.zero_() # set to 0
+
+            #TODO train ray marching!!!
+            xyzs, dirs, deltas, rays = RaymarchingTrainer(rays_o, rays_d, self.bound, self.density_bitfield, self.cascades, self.grid_size, nears, fars, counter, self.mean_count, perturb, 128, force_all_rays, dt_gamma, max_steps)
+
+            sigmas, rgbs = self(xyzs, dirs)
+            sigmas = self.density_scale * sigmas
+
+            # TODO train composite rays!!!
+            weights_sum, depth, image = CompositeRayTrainer(sigmas, rgbs, deltas, rays, T_thresh)
+            image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
+            depth = torch.clamp(depth - nears, min=0) / (fars - nears)
+            image = image.view(*prefix, 3)
+            depth = depth.view(*prefix)
+            
+            results['weights_sum'] = weights_sum
+
+        else:
+            # allocate outputs 
+            # if use autocast, must init as half so it won't be autocasted and lose reference.
+            #dtype = torch.half if torch.is_autocast_enabled() else torch.float32
+            # output should always be float32! only network inference uses half.
+            dtype = torch.float32
+            
+            weights_sum = torch.zeros(num_rays, dtype=dtype, device=device)
+            depth = torch.zeros(num_rays, dtype=dtype, device=device)
+            image = torch.zeros(num_rays, 3, dtype=dtype, device=device)
+            
+            n_alive = num_rays
+            rays_alive = torch.arange(n_alive, dtype=torch.int32, device=device) # [num_rays]
+            rays_t = nears.clone() # [num_rays]
+
+            step = 0
+            while step < max_steps:
+                # count alive rays 
+                n_alive = rays_alive.shape[0]
+                if n_alive == 0: # break if no alive rays
+                    break
+
+                # decide compact_steps
+                n_step = max(min(num_rays // n_alive, 8), 1)
+
+                #TODO: march rays function!!!
+                xyzs, dirs, deltas = MarchRaysInference(n_alive, n_step, rays_alive, rays_t, rays_o, rays_d, self.bound, self.density_bitfield, self.cascade, self.grid_size, nears, fars, 128, perturb if step == 0 else False, dt_gamma, max_steps)
+                sigmas, rgbs = self(xyzs, dirs)
+                sigmas = self.density_scale * sigmas
+
+                # TODO: composite rays function
+                CompositeRaysInference(n_alive, n_step, rays_alive, rays_t, sigmas, rgbs, deltas, weights_sum, depth, image, T_thresh)
+                rays_alive = rays_alive[rays_alive >= 0]
+                step += n_step
+        
+            # Construct image after inference loop done
+            image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
+            depth = torch.clamp(depth - nears, min=0) / (fars - nears)
+            image = image.view(*prefix, 3)
+            depth = depth.view(*prefix)
+        
+        results['depth'] = depth
+        results['image'] = image
+        return results
 
 
 class INGP(NerfRenderer):
