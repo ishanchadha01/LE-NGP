@@ -184,6 +184,45 @@ class RaymarchingTrainer(Function):
         return xyzs, dirs, deltas, rays
 
 
+class CompositeRayTrainer(Function):
+    @staticmethod
+    @custom_fwd(cast_inputs=torch.float32)
+    def forward(ctx, sigmas, rgbs, deltas, rays, T_thresh=1e-4):
+        ''' composite rays' rgbs, according to the ray marching formula.
+        Args:
+            rgbs: float, [max_points, 3]
+            sigmas: float, [max_points,]
+            deltas: float, [max_points, 2]
+            rays: int32, [max_points, 3]
+        Returns:
+            weights_sum: float, [num_rays,], the alpha channel
+            depth: float, [num_rays, ], the Depth
+            image: float, [num_rays, 3], the RGB channel (after multiplying alpha!)
+        '''
+        sigmas = sigmas.contiguous()
+        rgbs = rgbs.contiguous()
+        max_points = sigmas.shape[0]
+        num_rays = rays.shape[0]
+        weights_sum = torch.empty(N, dtype=sigmas.dtype, device=sigmas.device)
+        depth = torch.empty(N, dtype=sigmas.dtype, device=sigmas.device)
+        image = torch.empty(N, 3, dtype=sigmas.dtype, device=sigmas.device)
+        _cpp_backend.train_composite_rays_forward(sigmas, rgbs, deltas, rays, max_points, num_rays, T_thresh, weights_sum, depth, image)
+        ctx.save_for_backward(sigmas, rgbs, deltas, rays, weights_sum, depth, image)
+        ctx.dims = [max_points, num_rays, T_thresh]
+        return weights_sum, depth, image
+
+    @staticmethod
+    @custom_bwd
+    def backward(ctx, grad_weights_sum, grad_depth, grad_image):
+        grad_weights_sum = grad_weights_sum.contiguous()
+        grad_image = grad_image.contiguous()
+        sigmas, rgbs, deltas, rays, weights_sum, depth, image = ctx.saved_tensors
+        max_points, num_rays, T_thresh = ctx.dims
+        grad_sigmas = torch.zeros_like(sigmas)
+        grad_rgbs = torch.zeros_like(rgbs)
+        _cpp_backend.train_composite_rays_backward(grad_weights_sum, grad_image, sigmas, rgbs, deltas, rays, weights_sum, image, max_points, num_rays, T_thresh, grad_sigmas, grad_rgbs)
+        return grad_sigmas, grad_rgbs, None, None, None
+
 
 class NerfRenderer(nn):
     def __init__(self,
@@ -496,7 +535,6 @@ class NerfRenderer(nn):
             counter = self.step_counter[self.local_step % 16]
             counter.zero_() # set to 0
 
-            #TODO train ray marching!!!
             xyzs, dirs, deltas, rays = RaymarchingTrainer(
                 rays_o, 
                 rays_d, 
