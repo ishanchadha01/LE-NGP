@@ -260,9 +260,27 @@ class MarchRaysInference(Function):
         _cpp_backend.march_rays(n_alive, n_step, rays_alive, rays_t, rays_o, rays_d, scale, dt_gamma, max_steps, num_cascades, grid_size, density_bitfield, near, far, xyzs, dirs, deltas)
         return xyzs, dirs, deltas
 
-#TODO
+
 class CompositeRaysInference(Function):
-    pass
+    @staticmethod
+    @custom_fwd(cast_inputs=torch.float32) # need to cast sigmas & rgbs to float
+    def forward(ctx, n_alive, n_step, rays_alive, rays_t, sigmas, rgbs, deltas, weights_sum, depth, image, T_thresh=1e-2):
+        ''' composite rays' rgbs, according to the ray marching formula. (for inference)
+        Args:
+            n_alive: int, number of alive rays
+            n_step: int, how many steps we march
+            rays_alive: int, [n_alive], the alive rays' IDs in N (N >= n_alive)
+            rays_t: float, [N], the alive rays' time
+            sigmas: float, [n_alive * n_step,]
+            rgbs: float, [n_alive * n_step, 3]
+            deltas: float, [n_alive * n_step, 2], all generated points' deltas (here we record two deltas, the first is for RGB, the second for depth).
+        In-place Outputs:
+            weights_sum: float, [N,], the alpha channel
+            depth: float, [N,], the depth value
+            image: float, [N, 3], the RGB channel (after multiplying alpha!)
+        '''
+        _cpp_backend.composite_rays(n_alive, n_step, T_thresh, rays_alive, rays_t, sigmas, rgbs, deltas, weights_sum, depth, image)
+        return tuple()
 
 
 class NerfRenderer(nn):
@@ -645,8 +663,19 @@ class NerfRenderer(nn):
                 sigmas, rgbs = self(xyzs, dirs)
                 sigmas = self.density_scale * sigmas
 
-                # TODO: composite rays function
-                CompositeRaysInference(n_alive, n_step, rays_alive, rays_t, sigmas, rgbs, deltas, weights_sum, depth, image, T_thresh)
+                CompositeRaysInference(
+                    n_alive, 
+                    n_step, 
+                    rays_alive, 
+                    rays_t, 
+                    sigmas, 
+                    rgbs, 
+                    deltas, 
+                    weights_sum, 
+                    depth, 
+                    image, 
+                    T_thresh
+                )
                 rays_alive = rays_alive[rays_alive >= 0]
                 step += n_step
         

@@ -23,6 +23,20 @@ inline constexpr __device__ float PI() { return 3.141592653589793f; }
 inline constexpr __device__ float RPI() { return 0.3183098861837907f; }
 
 
+template <typename T>
+inline __host__ __device__ T div_round_up(T val, T divisor) {
+    return (val + divisor - 1) / divisor;
+}
+
+inline __host__ __device__ float signf(const float x) {
+    return copysignf(1.0, x);
+}
+
+inline __host__ __device__ float clamp(const float x, const float min, const float max) {
+    return fminf(max, fmaxf(min, x));
+}
+
+
 template <typename scalar_t>
 __global__ void kernel_march_rays(
     const uint32_t n_alive, 
