@@ -224,6 +224,47 @@ class CompositeRayTrainer(Function):
         return grad_sigmas, grad_rgbs, None, None, None
 
 
+class MarchRaysInference(Function):
+    @staticmethod
+    @custom_fwd(cast_inputs=torch.float32)
+    def forward(ctx, n_alive, n_step, rays_alive, rays_t, rays_o, rays_d, scale, density_bitfield, num_cascades, grid_size, near, far, dt_gamma=0, max_steps=1024):
+        ''' march rays to generate points (forward only, for inference)
+        Args:
+            n_alive: int, number of alive rays
+            n_step: int, how many steps we march
+            rays_alive: int, [N], the alive rays' IDs in N (N >= n_alive, but we only use first n_alive)
+            rays_t: float, [N], the alive rays' time, we only use the first n_alive.
+            rays_o/d: float, [N, 3]
+            scale: float, scalar
+            density_bitfield: uint8: [CHHH // 8]
+            num_cascades: int
+            grid_size: int
+            nears/fars: float, [N]
+            dt_gamma: float, called cone_angle in instant-ngp, exponentially accelerate ray marching if > 0. (very significant effect, but generally lead to worse performance)
+            max_steps: int, max number of sampled points along each ray, also affect min_stepsize.
+        Returns:
+            xyzs: float, [n_alive * n_step, 3], all generated points' coords
+            dirs: float, [n_alive * n_step, 3], all generated points' view dirs.
+            deltas: float, [n_alive * n_step, 2], all generated points' deltas (here we record two deltas, the first is for RGB, the second for depth).
+        '''
+        if not rays_o.is_cuda: 
+            rays_o = rays_o.cuda()
+        if not rays_d.is_cuda: 
+            rays_d = rays_d.cuda()
+        rays_o = rays_o.contiguous().view(-1, 3)
+        rays_d = rays_d.contiguous().view(-1, 3)
+        max_points = n_alive * n_step
+        xyzs = torch.zeros(max_points, 3, dtype=rays_o.dtype, device=rays_o.device)
+        dirs = torch.zeros(max_points, 3, dtype=rays_o.dtype, device=rays_o.device)
+        deltas = torch.zeros(max_points, 2, dtype=rays_o.dtype, device=rays_o.device) # 2 vals, one for rgb, one for depth
+        _cpp_backend.march_rays(n_alive, n_step, rays_alive, rays_t, rays_o, rays_d, scale, dt_gamma, max_steps, num_cascades, grid_size, density_bitfield, near, far, xyzs, dirs, deltas)
+        return xyzs, dirs, deltas
+
+#TODO
+class CompositeRaysInference(Function):
+    pass
+
+
 class NerfRenderer(nn):
     def __init__(self,
                  grid_size=128,
@@ -513,7 +554,7 @@ class NerfRenderer(nn):
 
 
     #TODO
-    def run_cuda(self, rays_o, rays_d, max_steps=1024, dt_gamma=0):
+    def run_cuda(self, rays_o, rays_d, max_steps=1024, dt_gamma=0, T_thresh=1e-4):
         # rays_o, rays_d: [num_batches, num_rays, 3], assume num_batches is 1 TODO why?
         # bg_color: [3] in range [0, 1]
         # dt_gamma: cone angle
@@ -551,7 +592,6 @@ class NerfRenderer(nn):
             sigmas, rgbs = self(xyzs, dirs)
             sigmas = self.density_scale * sigmas
 
-            # TODO train composite rays!!!
             weights_sum, depth, image = CompositeRayTrainer(sigmas, rgbs, deltas, rays, T_thresh)
             image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
             depth = torch.clamp(depth - nears, min=0) / (fars - nears)
@@ -586,7 +626,22 @@ class NerfRenderer(nn):
                 n_step = max(min(num_rays // n_alive, 8), 1)
 
                 #TODO: march rays function!!!
-                xyzs, dirs, deltas = MarchRaysInference(n_alive, n_step, rays_alive, rays_t, rays_o, rays_d, self.bound, self.density_bitfield, self.cascade, self.grid_size, nears, fars, 128, perturb if step == 0 else False, dt_gamma, max_steps)
+                xyzs, dirs, deltas = MarchRaysInference(
+                    n_alive, 
+                    n_step, 
+                    rays_alive, 
+                    rays_t, 
+                    rays_o, 
+                    rays_d, 
+                    self.scale, 
+                    self.density_bitfield, 
+                    self.cascades, 
+                    self.grid_size, 
+                    nears, 
+                    fars, 
+                    dt_gamma, 
+                    max_steps
+                )
                 sigmas, rgbs = self(xyzs, dirs)
                 sigmas = self.density_scale * sigmas
 

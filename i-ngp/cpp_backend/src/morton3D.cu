@@ -13,6 +13,12 @@
 #include "include/morton3D.h"
 
 
+template <typename T>
+inline __host__ __device__ T div_round_up(T val, T divisor) {
+    return (val + divisor - 1) / divisor;
+}
+
+
 inline __host__ __device__ uint32_t __expand_bits(uint32_t v)
 {
 	v = (v * 0x00010001u) & 0xFF0000FFu;

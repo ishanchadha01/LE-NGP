@@ -23,6 +23,12 @@ inline constexpr __device__ float PI() { return 3.141592653589793f; }
 inline constexpr __device__ float RPI() { return 0.3183098861837907f; }
 
 
+template <typename T>
+inline __host__ __device__ T div_round_up(T val, T divisor) {
+    return (val + divisor - 1) / divisor;
+}
+
+
 // sigmas: [M]
 // rgbs: [M, 3]
 // deltas: [M, 2]

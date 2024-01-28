@@ -13,6 +13,17 @@
 #include "include/ray_intersection.h"
 
 
+inline __host__ __device__ void swapf(float& a, float& b) {
+    float c = a; a = b; b = c;
+}
+
+
+template <typename T>
+inline __host__ __device__ T div_round_up(T val, T divisor) {
+    return (val + divisor - 1) / divisor;
+}
+
+
 // rays_o/d: [N, 3]
 // nears/fars: [N]
 // scalar_t should always be float in use.

@@ -17,11 +17,26 @@
 #define CHECK_IS_INT(x) TORCH_CHECK(x.scalar_type() == at::ScalarType::Int, #x " must be an int tensor")
 #define CHECK_IS_FLOATING(x) TORCH_CHECK(x.scalar_type() == at::ScalarType::Float || x.scalar_type() == at::ScalarType::Half || x.scalar_type() == at::ScalarType::Double, #x " must be a floating tensor")
 
-
 inline constexpr __device__ float SQRT3() { return 1.7320508075688772f; }
 inline constexpr __device__ float RSQRT3() { return 0.5773502691896258f; }
 inline constexpr __device__ float PI() { return 3.141592653589793f; }
 inline constexpr __device__ float RPI() { return 0.3183098861837907f; }
+
+
+inline __host__ __device__ float clamp(const float x, const float min, const float max) {
+    return fminf(max, fmaxf(min, x));
+}
+
+
+inline __host__ __device__ float signf(const float x) {
+    return copysignf(1.0, x);
+}
+
+
+template <typename T>
+inline __host__ __device__ T div_round_up(T val, T divisor) {
+    return (val + divisor - 1) / divisor;
+}
 
 
 inline __device__ int mip_from_pos(const float x, const float y, const float z, const float max_cascade) {

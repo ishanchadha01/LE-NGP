@@ -13,4 +13,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("train_raymarching", &train_raymarching, "train_raymarching (CUDA)")
     m.def("train_composite_rays_forward", &train_composite_rays_forward, "train_composite_rays_forward (CUDA)")
     m.def("train_composite_rays_backward", &train_composite_rays_backward, "train_composite_rays_backward (CUDA)")
+    m.def("march_rays", &march_rays, "march_rays (CUDA)")
 }
