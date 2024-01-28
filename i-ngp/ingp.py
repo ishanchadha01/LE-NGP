@@ -121,6 +121,70 @@ class RayIntersection(Function):
         return nears, fars
 
 
+class RaymarchingTrainer(Function):
+    @staticmethod
+    @custom_fwd(cast_inputs=torch.float32)
+    def forward(ctx, rays_o, rays_d, scale, density_bitfield, num_cascades, grid_size, nears, fars, dt_gamma=0, max_steps=1024):
+        '''
+        Generate points by marching rays
+        Args:
+            rays_o/d: float, [N, 3]
+            scale: float, scalar
+            density_bitfield: uint8: [num_cascades * grid_size**3 // 8]
+            num_cascades
+            grid_size
+            nears/fars: float, [N]
+            dt_gamma: float, called cone_angle in instant-ngp, exponentially accelerate ray marching if > 0. (very significant effect, but generally lead to worse performance)
+            max_steps: int, max number of sampled points along each ray, also affect min_stepsize
+        Returns:
+            xyzs: float, [M, 3], all generated points' coords (all rays concated, need to use `rays` to extract points belonging to each ray)
+            dirs: float, [M, 3], all generated points' view dirs
+            deltas: float, [M, 2], all generated points' deltas (first for RGB, second for Depth)
+            rays: int32, [N, 3], all rays (index, point_offset, point_count), e.g., xyzs[rays[i, 1]:rays[i, 2]] --> points belonging to rays[i, 0]
+        '''
+        if not rays_o.is_cuda: 
+            rays_o = rays_o.cuda()
+        if not rays_d.is_cuda: 
+            rays_d = rays_d.cuda()
+        if not density_bitfield.is_cuda: 
+            density_bitfield = density_bitfield.cuda()
+        rays_o = rays_o.contiguous().view(-1, 3)
+        rays_d = rays_d.contiguous().view(-1, 3)
+        density_bitfield = density_bitfield.contiguous()
+        num_rays = rays_o.shape[0] # num rays
+        max_points = num_rays * max_steps # init max points number in total
+
+        xyzs = torch.zeros(max_points, 3, dtype=rays_o.dtype, device=rays_o.device)
+        dirs = torch.zeros(max_points, 3, dtype=rays_o.dtype, device=rays_o.device)
+        deltas = torch.zeros(max_points, 2, dtype=rays_o.dtype, device=rays_o.device)
+        rays = torch.empty(num_rays, 3, dtype=torch.int32, device=rays_o.device) # id, offset, num_steps
+        step_counter = torch.zeros(2, dtype=torch.int32, device=rays_o.device) # point counter, ray counter
+        #TODO: could add noise to rays
+
+        _cpp_backend.train_raymarching(
+            rays_o, 
+            rays_d, 
+            density_bitfield, 
+            scale, 
+            dt_gamma, 
+            max_steps, 
+            num_rays, 
+            num_cascades, 
+            grid_size, 
+            max_points, 
+            nears, 
+            fars, 
+            xyzs, 
+            dirs, 
+            deltas, 
+            rays, 
+            step_counter
+        )
+        #TODO could keep counter and empty cuda cache for first few epochs and initialize with mean value
+        return xyzs, dirs, deltas, rays
+
+
+
 class NerfRenderer(nn):
     def __init__(self,
                  grid_size=128,
@@ -410,9 +474,10 @@ class NerfRenderer(nn):
 
 
     #TODO
-    def run_cuda(self, rays_o, rays_d, max_steps=1024):
+    def run_cuda(self, rays_o, rays_d, max_steps=1024, dt_gamma=0):
         # rays_o, rays_d: [num_batches, num_rays, 3], assume num_batches is 1 TODO why?
         # bg_color: [3] in range [0, 1]
+        # dt_gamma: cone angle
         # return: image: [num_batches, num_rays, 3], depth: [num_batches, num_rays]
         prefix = rays_o.shape[:-1]
         rays_o = rays_o.contiguous().view(-1, 3)
@@ -432,7 +497,18 @@ class NerfRenderer(nn):
             counter.zero_() # set to 0
 
             #TODO train ray marching!!!
-            xyzs, dirs, deltas, rays = RaymarchingTrainer(rays_o, rays_d, self.bound, self.density_bitfield, self.cascades, self.grid_size, nears, fars, counter, self.mean_count, perturb, 128, force_all_rays, dt_gamma, max_steps)
+            xyzs, dirs, deltas, rays = RaymarchingTrainer(
+                rays_o, 
+                rays_d, 
+                scale=self.scale, 
+                density_bitfield=self.density_bitfield, 
+                num_cascades=self.cascades, 
+                grid_size=self.grid_size, 
+                nears=nears, 
+                fars=fars,
+                dt_gamma=dt_gamma, 
+                max_steps=max_steps
+            )
 
             sigmas, rgbs = self(xyzs, dirs)
             sigmas = self.density_scale * sigmas

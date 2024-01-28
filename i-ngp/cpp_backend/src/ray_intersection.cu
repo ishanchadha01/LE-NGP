@@ -10,6 +10,8 @@
 #include <stdexcept>
 #include <limits>
 
+#include "include/ray_intersection.h"
+
 
 // rays_o/d: [N, 3]
 // nears/fars: [N]

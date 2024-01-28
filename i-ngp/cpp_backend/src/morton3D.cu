@@ -10,6 +10,8 @@
 #include <stdexcept>
 #include <limits>
 
+#include "include/morton3D.h"
+
 
 inline __host__ __device__ uint32_t __expand_bits(uint32_t v)
 {
