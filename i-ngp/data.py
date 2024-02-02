@@ -6,12 +6,16 @@ import json
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
 from torch.utils.data import DataLoader
+import torch.nn as nn
+import cv2
+import torch.distributed as distributed
+import imageio
 
-# from metrics import PSNRMeter
-from utils import nerf_matrix_to_ngp, rand_poses, get_rays
+from metrics import PSNRMeter
+from utils import nerf_matrix_to_ngp, rand_poses, get_rays, linear_to_srgb, srgb_to_linear
 
 
-#TODO
+
 class NerfDataset():
     def __init__(self, 
                  device, 
@@ -24,6 +28,9 @@ class NerfDataset():
                  fp16, # if preload, load into fp16
                  num_rays,
                  rand_pose,
+                 error_map,
+                 color_space,
+                 patch_size,
                  type='train', # train, val, test
                  n_test=10
                  ):
@@ -38,6 +45,9 @@ class NerfDataset():
         self.offset = offset 
         self.bbox_scale = bbox_scale 
         self.fp16 = fp16
+        self.error_map = error_map
+        self.color_space = color_space
+        self.patch_size = patch_size
 
         self.training = self.type in ['train', 'all', 'trainval']
         self.num_rays = num_rays if self.training else -1
@@ -86,7 +96,7 @@ class NerfDataset():
         self.radius = self.poses[:, :3, 3].norm(dim=-1).mean(0).item()
 
         # initialize error_map
-        if self.training and self.opt.error_map:
+        if self.training and self.error_map:
             self.error_map = torch.ones([self.images.shape[0], 128 * 128], dtype=torch.float) # [B, 128 * 128], flattened for easy indexing, fixed resolution...
         else:
             self.error_map = None
@@ -97,7 +107,7 @@ class NerfDataset():
             self.poses = self.poses.to(self.device)
             if self.images is not None:
                 # TODO: linear use pow, but pow for half is only available for torch >= 1.10 ?
-                if self.fp16 and self.opt.color_space != 'linear':
+                if self.fp16 and self.color_space != 'linear':
                     dtype = torch.half
                 else:
                     dtype = torch.float
@@ -137,7 +147,7 @@ class NerfDataset():
 
         poses = self.poses[index].to(self.device) # [B, 4, 4]
         error_map = None if self.error_map is None else self.error_map[index]
-        rays = get_rays(poses, self.intrinsics, self.H, self.W, self.num_rays, error_map, self.opt.patch_size)
+        rays = get_rays(poses, self.intrinsics, self.H, self.W, self.num_rays, error_map, self.patch_size)
         results = {
             'H': self.H,
             'W': self.W,
@@ -174,6 +184,7 @@ class Trainer():
                  criterion,
                  optimizer,
                  device,
+                 color_space="linear",
                  experiment_name="ngp",
                  workspace="./workspace", 
                  ema_decay=0.95, # for smoothing
@@ -197,7 +208,7 @@ class Trainer():
         self.metrics = metrics
         self.use_checkpoint = use_checkpoint
         self.eval_interval = eval_interval
-        self.local_rank - local_rank
+        self.local_rank = local_rank
 
         #TODO: could do distributed training
         # model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
@@ -216,8 +227,6 @@ class Trainer():
 
         # initialize other variables
         self.epoch = 0
-        self.local_step = 0
-        self.global_step = 0
         self.stats = {
             "loss": [],
             "valid_loss": [],
@@ -246,18 +255,17 @@ class Trainer():
             print(*args, file=self.log_ptr)
             self.log_ptr.flush() # write to file immediately
 
-    def train_step(self, data):
-        # trace rays through image to render them
-        rays_o = data["rays_o"]
-        rays_d = data["rays_d"]
 
     def train_one_epoch(self, train_loader):
         self.log(f"Training Epoch {self.epoch}")
         self.model.train() # Put model in training mode
 
         # Clear metrics
-        for metric in self.metrics:
-            metric.clear()
+        total_loss = 0
+        if self.local_rank == 0:
+            for metric in self.metrics:
+                metric.clear()
+        self.model.train()
 
         # distributedSampler: must call set_epoch() to shuffle indices across multiple epochs
         # ref: https://pytorch.org/docs/stable/data.html
@@ -266,30 +274,286 @@ class Trainer():
             total=len(train_loader) * train_loader.batch_size, 
             bar_format='{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
 
+        self.local_step = 0
         for data in train_loader:
+            # update grid every 16 steps
+            if self.model.cuda_ray and self.global_step % 16 == 0:
+                with torch.cuda.amp.autocast(enabled=self.fp16):
+                    self.model.update_extra_state()
 
-            # render it first??
+            self.local_step += 1
+            self.global_step += 1
 
-            with torch.cuda.amp.autocast_mode():
-                self.train_step()
+            self.optimizer.zero_grad()
+            with torch.cuda.amp.autocast(enabled=self.fp16):
+                preds, truths, loss = self.train_step(data)
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            if self.scheduler_update_every_step:
+                self.lr_scheduler.step()
+            loss_val = loss.item()
+            total_loss += loss_val
 
-    def eval_one_epoch(self):
-        pass
+            if self.local_rank == 0:
+                for metric in self.metrics:
+                    metric.update(preds, truths)
+                if self.scheduler_update_every_step:
+                    pbar.set_description(f"loss={loss_val:.4f} ({total_loss/self.local_step:.4f}), lr={self.optimizer.param_groups[0]['lr']:.6f}")
+                else:
+                    pbar.set_description(f"loss={loss_val:.4f} ({total_loss/self.local_step:.4f})")
+                pbar.update(train_loader.batch_size)
 
-    def eval_step(self):
-        pass
+        if self.ema is not None:
+            self.ema.update()
 
-    def test_step(self):
-        pass
+        average_loss = total_loss / self.local_step
+        self.stats["loss"].append(average_loss)
+        if self.local_rank == 0:
+            pbar.close()
+            for metric in self.metrics:
+                self.log(metric.report(), style="red")
+                if self.use_tensorboardX:
+                    metric.write(self.writer, self.epoch, prefix="train")
+                metric.clear()
 
-    def train(self):
-        pass
+        if not self.scheduler_update_every_step:
+            if isinstance(self.lr_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                self.lr_scheduler.step(average_loss)
+            else:
+                self.lr_scheduler.step()
 
-    def eval(self):
-        pass
+        self.log(f"==> Finished Epoch {self.epoch}.")
+            
+    def eval_one_epoch(self, eval_loader):
+        self.log(f"Eval Epoch {self.epoch}")
+        name = f'{self.name}_ep{self.epoch:04d}'
 
-    def test(self):
-        pass
+        total_loss = 0
+        if self.local_rank == 0:
+            for metric in self.metrics:
+                metric.clear()
+        self.model.eval()
+
+        if self.ema is not None:
+            self.ema.store()
+            self.ema.copy_to()
+
+        if self.local_rank == 0:
+            pbar = tqdm.tqdm(total=len(eval_loader) * eval_loader.batch_size, bar_format='{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+
+        with torch.no_grad():
+            self.local_step = 0
+            for data in eval_loader:
+                self.local_step += 1
+                with torch.cuda.amp.autocast(enabled=self.fp16):
+                    preds, preds_depth, truths, loss = self.eval_step(data)
+
+                # all_gather/reduce the statistics (NCCL only support all_*), basically mapreduce
+                if self.world_size > 1:
+                    distributed.all_reduce(loss, op=dist.ReduceOp.SUM)
+                    loss = loss / self.world_size
+                    
+                    preds_list = [torch.zeros_like(preds).to(self.device) for _ in range(self.world_size)] # [[B, ...], [B, ...], ...]
+                    distributed.all_gather(preds_list, preds)
+                    preds = torch.cat(preds_list, dim=0)
+
+                    preds_depth_list = [torch.zeros_like(preds_depth).to(self.device) for _ in range(self.world_size)] # [[B, ...], [B, ...], ...]
+                    distributed.all_gather(preds_depth_list, preds_depth)
+                    preds_depth = torch.cat(preds_depth_list, dim=0)
+
+                    truths_list = [torch.zeros_like(truths).to(self.device) for _ in range(self.world_size)] # [[B, ...], [B, ...], ...]
+                    distributed.all_gather(truths_list, truths)
+                    truths = torch.cat(truths_list, dim=0)
+                loss_val = loss.item()
+                total_loss += loss_val
+
+                if self.local_rank == 0:
+                    for metric in self.metrics:
+                        metric.update(preds, truths)
+
+                    # save image
+                    save_path = os.path.join(self.workspace, 'validation', f'{name}_{self.local_step:04d}_rgb.png')
+                    save_path_depth = os.path.join(self.workspace, 'validation', f'{name}_{self.local_step:04d}_depth.png')
+                    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+                    if self.color_space == 'linear':
+                        preds = linear_to_srgb(preds)
+                    pred = preds[0].detach().cpu().numpy()
+                    pred = (pred * 255).astype(np.uint8)
+                    pred_depth = preds_depth[0].detach().cpu().numpy()
+                    pred_depth = (pred_depth * 255).astype(np.uint8)
+                    cv2.imwrite(save_path, cv2.cvtColor(pred, cv2.COLOR_RGB2BGR))
+                    cv2.imwrite(save_path_depth, pred_depth)
+                    pbar.set_description(f"loss={loss_val:.4f} ({total_loss/self.local_step:.4f})")
+                    pbar.update(eval_loader.batch_size)
+
+        average_loss = total_loss / self.local_step
+        self.stats["valid_loss"].append(average_loss)
+
+        if self.local_rank == 0:
+            pbar.close()
+            if len(self.metrics) > 0:
+                result = self.metrics[0].measure()
+                self.stats["results"].append(result)
+            else:
+                self.stats["results"].append(average_loss) # if no metric, choose best by min loss
+
+            for metric in self.metrics:
+                self.log(metric.report(), style="blue")
+                if self.use_tensorboardX:
+                    metric.write(self.writer, self.epoch, prefix="evaluate")
+                metric.clear()
+
+        if self.ema is not None:
+            self.ema.restore()
+        self.log(f"++> Evaluate epoch {self.epoch} Finished.")
+
+    def train_step(self, data):
+        # trace rays through image to render them
+        rays_o = data["rays_o"]
+        rays_d = data["rays_d"]
+        images = data['images'] # [B, N, 3/4]
+        B, N, C = images.shape #batches, imgs, channels
+
+        if self.color_space == 'linear':
+            images[..., :3] = srgb_to_linear(images[..., :3])
+
+        if C == 3 or self.model.bg_radius > 0:
+            bg_color = 1
+        else: # train with random background color if not using a bg model and has alpha channel
+            bg_color = torch.rand_like(images[..., :3]) # [N, 3], pixel-wise random.
+
+        if C == 4:
+            gt_rgb = images[..., :3] * images[..., 3:] + bg_color * (1 - images[..., 3:])
+        else:
+            gt_rgb = images
+
+        outputs = self.model.render(rays_o, rays_d)
+        pred_rgb = outputs['image']
+        loss = self.criterion(pred_rgb, gt_rgb).mean(-1) # [B, N, 3] --> [B, N], mse loss
+
+        # patch-based rendering
+        if self.patch_size > 1:
+            gt_rgb = gt_rgb.view(-1, self.patch_size, self.patch_size, 3).permute(0, 3, 1, 2).contiguous()
+            pred_rgb = pred_rgb.view(-1, self.patch_size, self.patch_size, 3).permute(0, 3, 1, 2).contiguous()
+
+        # special case for CCNeRF's rank-residual training
+        if len(loss.shape) == 3: # [K, B, N]
+            loss = loss.mean(0)
+
+        # update error_map
+        if self.error_map is not None:
+            index = data['index'] # [B]
+            inds = data['inds_coarse'] # [B, N]
+
+            # take out, this is an advanced indexing and the copy is unavoidable.
+            error_map = self.error_map[index] # [B, H * W]
+            # TODO: could save error map here to visualize and debug
+            error = loss.detach().to(error_map.device) # [B, N], already in [0, 1]
+            
+            # ema update
+            ema_error = 0.1 * error_map.gather(1, inds) + 0.9 * error
+            error_map.scatter_(1, inds, ema_error)
+
+            # put back
+            self.error_map[index] = error_map
+
+        loss = loss.mean()
+        return pred_rgb, gt_rgb, loss
+
+    def eval_step(self, data):
+        rays_o = data['rays_o'] # [B, N, 3]
+        rays_d = data['rays_d'] # [B, N, 3]
+        images = data['images'] # [B, H, W, 3/4]
+        B, H, W, C = images.shape
+        if self.opt.color_space == 'linear':
+            images[..., :3] = srgb_to_linear(images[..., :3])
+
+        # eval with fixed background color
+        bg_color = 1
+        if C == 4:
+            gt_rgb = images[..., :3] * images[..., 3:] + bg_color * (1 - images[..., 3:])
+        else:
+            gt_rgb = images
+        outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=False, **vars(self.opt))
+        pred_rgb = outputs['image'].reshape(B, H, W, 3)
+        pred_depth = outputs['depth'].reshape(B, H, W)
+        loss = self.criterion(pred_rgb, gt_rgb).mean()
+        return pred_rgb, pred_depth, gt_rgb, loss
+
+    def test_step(self, data, bg_color=None):  
+        rays_o = data['rays_o'] # [B, N, 3]
+        rays_d = data['rays_d'] # [B, N, 3]
+        H, W = data['H'], data['W']
+        if bg_color is not None:
+            bg_color = bg_color.to(self.device)
+        outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, **vars(self.opt))
+        pred_rgb = outputs['image'].reshape(-1, H, W, 3)
+        pred_depth = outputs['depth'].reshape(-1, H, W)
+        return pred_rgb, pred_depth
+
+    def train(self, train_loader, valid_loader, max_epochs):
+        # mark untrained region (i.e., not covered by any camera from the training dataset)
+        if self.model.cuda_ray:
+            self.model.mark_untrained_grid(train_loader._data.poses, train_loader._data.intrinsics)
+
+        # get a ref to error_map
+        self.error_map = train_loader._data.error_map
+        for epoch in range(self.epoch + 1, max_epochs + 1):
+            self.epoch = epoch
+            self.train_one_epoch(train_loader)
+            if self.workspace is not None and self.local_rank == 0:
+                self.save_checkpoint(full=True, best=False)
+            if self.epoch % self.eval_interval == 0:
+                self.evaluate_one_epoch(valid_loader)
+                self.save_checkpoint(full=False, best=True)
+
+    def eval(self, loader, name=None):
+        self.eval_one_epoch(loader, name)
+
+    def test(self, test_loader, save_path=None, name=None, write_video=True):
+        if save_path is None:
+            save_path = os.path.join(self.workspace, 'results')
+        if name is None:
+            name = f'{self.name}_ep{self.epoch:04d}'
+
+        os.makedirs(save_path, exist_ok=True)
+        self.log(f"==> Start Test, save results to {save_path}")
+        pbar = tqdm.tqdm(total=len(test_loader) * test_loader.batch_size, bar_format='{percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+        self.model.eval()
+        if write_video:
+            all_preds = []
+            all_preds_depth = []
+        
+        with torch.no_grad():
+            for i, data in enumerate(test_loader):
+                with torch.cuda.amp.autocast(enabled=self.fp16):
+                    preds, preds_depth = self.test_step(data)
+                if self.opt.color_space == 'linear':
+                    preds = linear_to_srgb(preds)
+
+                pred = preds[0].detach().cpu().numpy()
+                pred = (pred * 255).astype(np.uint8)
+                pred_depth = preds_depth[0].detach().cpu().numpy()
+                pred_depth = (pred_depth * 255).astype(np.uint8)
+
+                if write_video:
+                    all_preds.append(pred)
+                    all_preds_depth.append(pred_depth)
+                else:
+                    cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_rgb.png'), cv2.cvtColor(pred, cv2.COLOR_RGB2BGR))
+                    cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_depth.png'), pred_depth)
+                pbar.update(test_loader.batch_size)
+        
+        if write_video:
+            all_preds = np.stack(all_preds, axis=0)
+            all_preds_depth = np.stack(all_preds_depth, axis=0)
+            imageio.mimwrite(os.path.join(save_path, f'{name}_rgb.mp4'), all_preds, fps=25, quality=8, macro_block_size=1)
+            imageio.mimwrite(os.path.join(save_path, f'{name}_depth.mp4'), all_preds_depth, fps=25, quality=8, macro_block_size=1)
+
+        self.log(f"==> Finished Test.")
+    
 
     def save_ckpt(self):
         pass

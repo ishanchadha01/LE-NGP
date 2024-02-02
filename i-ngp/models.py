@@ -502,7 +502,6 @@ class INGP(NerfRenderer):
 
         return sigmas, rgbs
 
-
     def density(self, x):
         """
         Inputs:

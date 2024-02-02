@@ -173,3 +173,14 @@ def sample_pdf(bins, weights, n_samples, is_deterministic=False):
 
     return samples
 
+
+@torch.jit.script
+def linear_to_srgb(x):
+    # compile just in time for speedup, linear to sRGB (commonly used in images)
+    return torch.where(x < 0.0031308, 12.92 * x, 1.055 * x ** 0.41666 - 0.055)
+
+
+@torch.jit.script
+def srgb_to_linear(x):
+    return torch.where(x < 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
+
