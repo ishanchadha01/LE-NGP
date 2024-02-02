@@ -1,5 +1,4 @@
 import torch
-from torch_ema import ExponentialMovingAverage
 
 from models import INGP
 from metrics import PSNRMeter
