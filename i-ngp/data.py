@@ -7,8 +7,8 @@ import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
 from torch.utils.data import DataLoader
 
-from metrics import PSNRMeter
-from utils import nerf_matrix_to_ngp, rand_poses
+# from metrics import PSNRMeter
+from utils import nerf_matrix_to_ngp, rand_poses, get_rays
 
 
 #TODO
@@ -121,17 +121,13 @@ class NerfDataset():
 
     def collate(self, index):
         B = len(index) # a list of length 1
-
-        # random pose without gt images.
-        if self.rand_pose == 0 or index[0] >= len(self.poses):
-
+        if self.rand_pose == 0 or index[0] >= len(self.poses): # random pose without ground truth images
             poses = rand_poses(B, self.device, radius=self.radius)
 
-            # sample a low-resolution but full image for CLIP
+            # sample a low-resolution but full image for speedup
             s = np.sqrt(self.H * self.W / self.num_rays) # only in training, assert num_rays > 0
             rH, rW = int(self.H / s), int(self.W / s)
             rays = get_rays(poses, self.intrinsics / s, rH, rW, -1)
-
             return {
                 'H': rH,
                 'W': rW,
@@ -140,19 +136,35 @@ class NerfDataset():
             }
 
         poses = self.poses[index].to(self.device) # [B, 4, 4]
-
         error_map = None if self.error_map is None else self.error_map[index]
-        
         rays = get_rays(poses, self.intrinsics, self.H, self.W, self.num_rays, error_map, self.opt.patch_size)
-
         results = {
             'H': self.H,
             'W': self.W,
             'rays_o': rays['rays_o'],
-          
+            'rays_d': rays['rays_d'],
+        }
+        if self.images is not None:
+            images = self.images[index].to(self.device) # [B, H, W, 3/4]
+            if self.training:
+                C = images.shape[-1]
+                images = torch.gather(images.view(B, -1, C), 1, torch.stack(C * [rays['inds']], -1)) # [B, N, 3/4]
+            results['images'] = images
+        
+        # need inds to update error_map
+        if error_map is not None:
+            results['index'] = index
+            results['inds_coarse'] = rays['inds_coarse']   
+        return results
 
     def dataloader(self):
-        pass
+        size = len(self.poses)
+        if self.training and self.rand_pose > 0:
+            size += size // self.rand_pose # index >= size means we use random pose.
+        loader = DataLoader(list(range(size)), batch_size=1, collate_fn=self.collate, shuffle=self.training, num_workers=0)
+        loader._data = self # need to access error_map & poses in trainer
+        loader.has_gt = self.images is not None
+        return loader
 
 #TODO
 class Trainer():
