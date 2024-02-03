@@ -176,7 +176,7 @@ class NerfDataset():
         loader.has_gt = self.images is not None
         return loader
 
-#TODO
+
 class Trainer():
     def __init__(self, 
                  model,

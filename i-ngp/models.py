@@ -1,5 +1,5 @@
 import torch
-import torch.nn.Module as nn
+import torch.nn as nn
 import numpy as np
 import tinycudann as tcnn
 

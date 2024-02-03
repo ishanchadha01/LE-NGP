@@ -2,6 +2,7 @@ import torch
 
 from models import INGP
 from metrics import PSNRMeter
+from data import NerfDataset, Trainer
 
 
 def main():
