@@ -8,7 +8,7 @@ from utils import sample_pdf
 from functions import *
 
 
-class NerfRenderer(nn):
+class NerfRenderer(nn.Module):
     def __init__(self,
                  grid_size=128,
                  scale=1, # bounding box bounds for xyz/dir 
@@ -19,15 +19,15 @@ class NerfRenderer(nn):
         super().__init__()
         self.scale = scale
         # TODO: this is fine for testing, but there should be scale>1 or else only 1 cascade=1 resolution
-        self.cascades = 1 + np.ceil(np.log2(self.scale)) # power of 2 range, eg self.scale=8 gives 4 cascades, [1,2,4,8]
+        self.cascades = int(1 + np.ceil(np.log2(self.scale))) # power of 2 range, eg self.scale=8 gives 4 cascades, [1,2,4,8]
         self.grid_size = grid_size
         self.cuda_ray_marching = cuda_ray_marching
         self.density_threshold = density_threshold
 
         # create axis-aligned bounding box (xmin, xmax, ymin, ymax, zmin, zmax)
-        self.aabb = torch.tensor([-1, 1, -1, 1, -1, 1])
+        aabb = torch.tensor([-1, 1, -1, 1, -1, 1])
         # buffer saves data but unline parameter (no grad but updated by optimizer), it's not updated by optimizer
-        self.register_buffer("aabb", self.aabb) 
+        self.register_buffer("aabb", aabb) 
 
         # additional info for ray marching in cuda, maintained as extra state
         if self.cuda_ray_marching: # TODO: try turning this off if doesnt work
@@ -467,7 +467,7 @@ class INGP(NerfRenderer):
             network_config={
                 "otype": "FullyFusedMLP",
                 "activation": "ReLU",
-                "output_activation": self.rgb_act,
+                "output_activation": "None",
                 "n_neurons": self.hidden_dim,
                 "n_hidden_layers": self.num_layers,
             }
@@ -600,7 +600,7 @@ class LENGP(NerfRenderer):
             network_config={
                 "otype": "FullyFusedMLP",
                 "activation": "ReLU",
-                "output_activation": self.rgb_act,
+                "output_activation": "None",
                 "n_neurons": self.hidden_dim,
                 "n_hidden_layers": self.num_layers,
             }

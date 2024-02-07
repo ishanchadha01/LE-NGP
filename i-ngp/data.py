@@ -18,19 +18,19 @@ from utils import nerf_matrix_to_ngp, rand_poses, get_rays, linear_to_srgb, srgb
 
 class NerfDataset():
     def __init__(self, 
-                 device, 
-                 downscale,
-                 path,
-                 preload, # preload data into GPU
-                 camera_scale, # camera radius scale to make sure camera are inside the bounding box
-                 offset, # camera offset
-                 bbox_scale, # bounding box half length, also used as the radius to random sample poses
-                 fp16, # if preload, load into fp16
-                 num_rays,
-                 rand_pose,
-                 error_map,
-                 color_space,
-                 patch_size,
+                 device="cuda", 
+                 downscale=1,
+                 path="./data",
+                 preload=True, # preload data into GPU
+                 camera_scale=1, # camera radius scale to make sure camera are inside the bounding box
+                 offset=0, # camera offset
+                 bbox_scale=1, # bounding box half length, also used as the radius to random sample poses
+                 fp16=True, # if preload, load into fp16
+                 num_rays=4096,
+                 rand_pose=-1,
+                 error_map=True,
+                 color_space="srgb",
+                 patch_size=1, # [experimental] render patches in training, so as to apply LPIPS loss. 1 means disabled, use [64, 32, 16] to enable
                  type='train', # train, val, test
                  n_test=10
                  ):
@@ -54,7 +54,7 @@ class NerfDataset():
         self.rand_pose = rand_pose
 
         # auto-detect transforms.json and split mode
-        if os.path.exists(os.path.join(self.root_path, 'transforms.json')):
+        if os.path.exists(os.path.join(self.root_path, 'transforms_train.json')): #TODO: make a combined transforms json or separate transforms_train and transforms_test
             self.mode = 'colmap' # manually split, use view-interpolation for test
             with open(os.path.join(self.root_path, 'transforms.json'), 'r') as f: # load nerf-compatible format data
                 transform = json.load(f)
