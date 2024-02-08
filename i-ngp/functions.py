@@ -2,7 +2,7 @@ import torch
 from torch.autograd import Function
 from torch.cuda.amp import custom_bwd, custom_fwd 
 
-import cpp_backend
+import _cpp_backend.cpp_backend as cpp_backend
 
 
 class TruncExp(Function):

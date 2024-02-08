@@ -1,6 +1,6 @@
 certifi==2023.11.17
 charset-normalizer==3.3.2
-clip @ git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33
+# clip @ git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33
 filelock==3.13.1
 fsspec==2023.12.2
 ftfy==6.1.3
