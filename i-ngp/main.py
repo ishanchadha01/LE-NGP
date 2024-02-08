@@ -21,12 +21,11 @@ def main(root_path):
     # decay to 0.1 * init_lr at last iter step
     scheduler = lambda optimizer: torch.optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / iters, 1))
     metrics = [PSNRMeter()]
-    trainer = Trainer('ngp', 
-                      model, 
-                      device=device, 
-                      optimizer=optimizer,
-                      criterion=criterion, 
+    trainer = Trainer(model, 
                       lr_scheduler=scheduler, 
+                      criterion=criterion, 
+                      optimizer=optimizer,
+                      device=device, 
                       metrics=metrics)
     valid_loader = NerfDataset(device=device, type='val', downscale=1, path=root_path).dataloader()
 
@@ -44,9 +43,7 @@ def main(root_path):
     # trainer.save_mesh(resolution=256, threshold=10) TODO: implement
 
     # Testing
-    metrics = [PSNRMeter()]
-    trainer = Trainer(model, device=device, criterion=criterion, metrics=metrics)
-
+    # Can make a new trainer here if params are different
     
     test_loader = NerfDataset(device=device, type='test').dataloader()
 

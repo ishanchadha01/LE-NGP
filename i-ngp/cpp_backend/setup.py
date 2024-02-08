@@ -26,7 +26,7 @@ setup(
     name='cpp_backend', # package name, import this to use python API
     ext_modules=[
         CUDAExtension(
-            name='_cpp_backend', # extension name, import this to use CUDA API
+            name='cpp_backend', # extension name, import this to use CUDA API
             sources=[os.path.join(_src_path, 'src', f) for f in [
                 'morton3D.cu',
                 'ray_intersection.cu',

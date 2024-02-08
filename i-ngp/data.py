@@ -23,7 +23,7 @@ class NerfDataset():
                  path="./data",
                  preload=True, # preload data into GPU
                  camera_scale=1, # camera radius scale to make sure camera are inside the bounding box
-                 offset=0, # camera offset
+                 offset=[0,0,0], # camera offset
                  bbox_scale=1, # bounding box half length, also used as the radius to random sample poses
                  fp16=True, # if preload, load into fp16
                  num_rays=4096,
@@ -43,7 +43,7 @@ class NerfDataset():
         self.preload = preload 
         self.camera_scale = camera_scale
         self.offset = offset 
-        self.bbox_scale = bbox_scale 
+        self.bbox_scale = bbox_scale # not used ??
         self.fp16 = fp16
         self.error_map = error_map
         self.color_space = color_space
@@ -56,7 +56,7 @@ class NerfDataset():
         # auto-detect transforms.json and split mode
         if os.path.exists(os.path.join(self.root_path, 'transforms_train.json')): #TODO: make a combined transforms json or separate transforms_train and transforms_test
             self.mode = 'colmap' # manually split, use view-interpolation for test
-            with open(os.path.join(self.root_path, 'transforms.json'), 'r') as f: # load nerf-compatible format data
+            with open(os.path.join(self.root_path, 'transforms_train.json'), 'r') as f: # load nerf-compatible format data
                 transform = json.load(f)
         # dont use blender for now, TODO what is purpose of transforms_train?
         else:
@@ -70,13 +70,13 @@ class NerfDataset():
         # read images
         frames = transform["frames"]
         
-        # for colmap, manually interpolate a test set.
         if self.mode == 'colmap' and type == 'test':
+            # for colmap, manually interpolate a test set
             
             # choose two random poses, and interpolate between.
             f0, f1 = np.random.choice(frames, 2, replace=False)
-            pose0 = nerf_matrix_to_ngp(np.array(f0['transform_matrix'], dtype=np.float32), scale=self.scale, offset=self.offset) # [4, 4]
-            pose1 = nerf_matrix_to_ngp(np.array(f1['transform_matrix'], dtype=np.float32), scale=self.scale, offset=self.offset) # [4, 4]
+            pose0 = nerf_matrix_to_ngp(np.array(f0['transform_matrix'], dtype=np.float32), scale=self.camera_scale, offset=self.offset) # [4, 4]
+            pose1 = nerf_matrix_to_ngp(np.array(f1['transform_matrix'], dtype=np.float32), scale=self.camera_scale, offset=self.offset) # [4, 4]
             rots = Rotation.from_matrix(np.stack([pose0[:3, :3], pose1[:3, :3]])) # rotation between poses
             slerp = Slerp([0, 1], rots) # spherical interpolation between poses
 
@@ -88,6 +88,48 @@ class NerfDataset():
                 pose[:3, :3] = slerp(ratio).as_matrix()
                 pose[:3, 3] = (1 - ratio) * pose0[:3, 3] + ratio * pose1[:3, 3]
                 self.poses.append(pose)
+
+        else:
+            # for colmap, manually split a valid set (the first frame).
+            if self.mode == 'colmap':
+                if type == 'train':
+                    frames = frames[1:]
+                elif type == 'val':
+                    frames = frames[:1]
+                # else 'all' or 'trainval' : use all frames
+            
+            self.poses = []
+            self.images = []
+            for f in tqdm(frames, desc=f'Loading {type} data'):
+                f_path = os.path.join(self.root_path, f['file_path'])
+
+                # there are non-exist paths in fox...
+                if not os.path.exists(f_path):
+                    continue
+                
+                pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
+                pose = nerf_matrix_to_ngp(pose, scale=self.camera_scale, offset=self.offset)
+
+                image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W, 3] o [H, W, 4]
+                if self.H is None or self.W is None:
+                    self.H = image.shape[0] // downscale
+                    self.W = image.shape[1] // downscale
+
+                # add support for the alpha channel as a mask.
+                if image.shape[-1] == 3: 
+                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                else:
+                    image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
+
+                if image.shape[0] != self.H or image.shape[1] != self.W:
+                    image = cv2.resize(image, (self.W, self.H), interpolation=cv2.INTER_AREA)
+                    
+                image = image.astype(np.float32) / 255 # [H, W, 3/4]
+
+                self.poses.append(pose)
+                self.images.append(image)
+
+        
         self.poses = torch.from_numpy(np.stack(self.poses, axis=0)) # [N, 4, 4]
         if self.images is not None:
             self.images = torch.from_numpy(np.stack(self.images, axis=0)) # [N, H, W, C]
@@ -214,7 +256,7 @@ class Trainer():
         # model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
         model.to(self.device)
-        if isinstance(criterion, nn):
+        if isinstance(criterion, nn.Module):
             criterion.to(device)
         self.model = model
         self.criterion = criterion
@@ -240,9 +282,9 @@ class Trainer():
         self.log_path = os.path.join(workspace, f"log_{self.experiment_name}.txt")
         self.log_ptr = open(self.log_path, "a+")
         self.ckpt_path = os.path.join(self.workspace, "checkpoints")
-        self.best_path - os.path.join(self.ckpt_path, f"{experiment_name}.pth")
+        self.best_path = os.path.join(self.ckpt_path, f"{experiment_name}.pth")
         os.makedirs(self.ckpt_path, exist_ok=True)
-        self.load_checkpoint(self.use_checkpoint) # can configure this to be latest, best, etc
+        self.load_ckpt(self.use_checkpoint) # can configure this to be latest, best, etc
 
         # can use a clip based loss? why would an image to text classifier provide good loss function for this?
         # TODO: maybe similar to text guided object detection like dreamfields
@@ -270,14 +312,14 @@ class Trainer():
         # distributedSampler: must call set_epoch() to shuffle indices across multiple epochs
         # ref: https://pytorch.org/docs/stable/data.html
         train_loader.sampler.set_epoch(self.epoch) #TODO: might not need to do this due to small world size
-        pbar = tqdm.tqdm(
+        pbar = tqdm(
             total=len(train_loader) * train_loader.batch_size, 
             bar_format='{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
 
         self.local_step = 0
         for data in train_loader:
             # update grid every 16 steps
-            if self.model.cuda_ray and self.global_step % 16 == 0:
+            if self.model.cuda_ray_marching and self.global_step % 16 == 0:
                 with torch.cuda.amp.autocast(enabled=self.fp16):
                     self.model.update_extra_state()
 
@@ -340,7 +382,7 @@ class Trainer():
             self.ema.copy_to()
 
         if self.local_rank == 0:
-            pbar = tqdm.tqdm(total=len(eval_loader) * eval_loader.batch_size, bar_format='{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+            pbar = tqdm(total=len(eval_loader) * eval_loader.batch_size, bar_format='{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
 
         with torch.no_grad():
             self.local_step = 0
@@ -495,7 +537,7 @@ class Trainer():
 
     def train(self, train_loader, valid_loader, max_epochs):
         # mark untrained region (i.e., not covered by any camera from the training dataset)
-        if self.model.cuda_ray:
+        if self.model.cuda_ray_marching:
             self.model.mark_untrained_grid(train_loader._data.poses, train_loader._data.intrinsics)
 
         # get a ref to error_map
@@ -558,7 +600,7 @@ class Trainer():
     def save_ckpt(self):
         pass
 
-    def load_ckpt(self):
+    def load_ckpt(self, use_cpkt):
         pass
 
     def save_mesh(self):

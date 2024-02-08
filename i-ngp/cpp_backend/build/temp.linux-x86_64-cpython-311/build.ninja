@@ -1,0 +1,34 @@
+ninja_required_version = 1.3
+cxx = /usr/local/pace-apps/spack/packages/linux-rhel7-x86_64/gcc-4.8.5/gcc-10.3.0-o57x6h2gubo7bzh7evmy4mvibdqrlghr/bin/g++
+nvcc = /usr/local/pace-apps/spack/packages/linux-rhel7-x86_64/gcc-4.8.5/cuda-12.1.1-6oacj6llkpm7iikvkdenuozwwfwctxxp/bin/nvcc
+
+cflags = -DNDEBUG -fwrapv -O2 -Wall -fPIC -O2 -isystem /storage/home/hcoda1/3/ichadha3/.conda/envs/le_ngp/include -fPIC -O2 -isystem /storage/home/hcoda1/3/ichadha3/.conda/envs/le_ngp/include -fPIC -I/storage/coda1/p-ychen3538/0/ichadha3/ishan/le-ngp/i-ngp/include -I/storage/home/hcoda1/3/ichadha3/.conda/envs/le_ngp/lib/python3.11/site-packages/torch/include -I/storage/home/hcoda1/3/ichadha3/.conda/envs/le_ngp/lib/python3.11/site-packages/torch/include/torch/csrc/api/include -I/storage/home/hcoda1/3/ichadha3/.conda/envs/le_ngp/lib/python3.11/site-packages/torch/include/TH -I/storage/home/hcoda1/3/ichadha3/.conda/envs/le_ngp/lib/python3.11/site-packages/torch/include/THC -I/usr/local/pace-apps/spack/packages/linux-rhel7-x86_64/gcc-4.8.5/cuda-12.1.1-6oacj6llkpm7iikvkdenuozwwfwctxxp/include -I/storage/home/hcoda1/3/ichadha3/.conda/envs/le_ngp/include/python3.11 -c
+post_cflags = -O3 -std=c++14 -DTORCH_API_INCLUDE_EXTENSION_H '-DPYBIND11_COMPILER_TYPE="_gcc"' '-DPYBIND11_STDLIB="_libstdcpp"' '-DPYBIND11_BUILD_ABI="_cxxabi1011"' -DTORCH_EXTENSION_NAME=cpp_backend -D_GLIBCXX_USE_CXX11_ABI=0
+cuda_cflags = -I/storage/coda1/p-ychen3538/0/ichadha3/ishan/le-ngp/i-ngp/include -I/storage/home/hcoda1/3/ichadha3/.conda/envs/le_ngp/lib/python3.11/site-packages/torch/include -I/storage/home/hcoda1/3/ichadha3/.conda/envs/le_ngp/lib/python3.11/site-packages/torch/include/torch/csrc/api/include -I/storage/home/hcoda1/3/ichadha3/.conda/envs/le_ngp/lib/python3.11/site-packages/torch/include/TH -I/storage/home/hcoda1/3/ichadha3/.conda/envs/le_ngp/lib/python3.11/site-packages/torch/include/THC -I/usr/local/pace-apps/spack/packages/linux-rhel7-x86_64/gcc-4.8.5/cuda-12.1.1-6oacj6llkpm7iikvkdenuozwwfwctxxp/include -I/storage/home/hcoda1/3/ichadha3/.conda/envs/le_ngp/include/python3.11 -c
+cuda_post_cflags = -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options ''"'"'-fPIC'"'"'' -O3 -std=c++14 -U__CUDA_NO_HALF_OPERATORS__ -U__CUDA_NO_HALF_CONVERSIONS__ -U__CUDA_NO_HALF2_OPERATORS__ -DTORCH_API_INCLUDE_EXTENSION_H '-DPYBIND11_COMPILER_TYPE="_gcc"' '-DPYBIND11_STDLIB="_libstdcpp"' '-DPYBIND11_BUILD_ABI="_cxxabi1011"' -DTORCH_EXTENSION_NAME=cpp_backend -D_GLIBCXX_USE_CXX11_ABI=0 -gencode=arch=compute_80,code=compute_80 -gencode=arch=compute_80,code=sm_80 -ccbin /usr/local/pace-apps/spack/packages/linux-rhel7-x86_64/gcc-4.8.5/gcc-10.3.0-o57x6h2gubo7bzh7evmy4mvibdqrlghr/bin/gcc
+cuda_dlink_post_cflags = 
+ldflags = 
+
+rule compile
+  command = $cxx -MMD -MF $out.d $cflags -c $in -o $out $post_cflags
+  depfile = $out.d
+  deps = gcc
+
+rule cuda_compile
+  depfile = $out.d
+  deps = gcc
+  command = $nvcc  $cuda_cflags -c $in -o $out $cuda_post_cflags
+
+
+
+
+
+build /storage/coda1/p-ychen3538/0/ichadha3/ishan/le-ngp/i-ngp/cpp_backend/build/temp.linux-x86_64-cpython-311/storage/coda1/p-ychen3538/0/ichadha3/ishan/le-ngp/i-ngp/cpp_backend/src/bindings.o: compile /storage/coda1/p-ychen3538/0/ichadha3/ishan/le-ngp/i-ngp/cpp_backend/src/bindings.cpp
+build /storage/coda1/p-ychen3538/0/ichadha3/ishan/le-ngp/i-ngp/cpp_backend/build/temp.linux-x86_64-cpython-311/storage/coda1/p-ychen3538/0/ichadha3/ishan/le-ngp/i-ngp/cpp_backend/src/morton3D.o: cuda_compile /storage/coda1/p-ychen3538/0/ichadha3/ishan/le-ngp/i-ngp/cpp_backend/src/morton3D.cu
+build /storage/coda1/p-ychen3538/0/ichadha3/ishan/le-ngp/i-ngp/cpp_backend/build/temp.linux-x86_64-cpython-311/storage/coda1/p-ychen3538/0/ichadha3/ishan/le-ngp/i-ngp/cpp_backend/src/ray_intersection.o: cuda_compile /storage/coda1/p-ychen3538/0/ichadha3/ishan/le-ngp/i-ngp/cpp_backend/src/ray_intersection.cu
+
+
+
+
+
+

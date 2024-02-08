@@ -37,7 +37,7 @@ class Morton3D(Function):
             coords = coords.cuda()
         num_coords = coords.shape[0]
         indices = torch.empty(num_coords, dtype=torch.int32, device=coords.device)
-        _cpp_backend.morton3D(coords.int(), num_coords, indices)
+        cpp_backend.morton3D(coords.int(), num_coords, indices)
         return indices
 
 
@@ -55,7 +55,7 @@ class InverseMorton3D(Function):
             indices = indices.cuda()
         num_coords = indices.shape[0]
         coords = torch.empty(num_coords, 3, dtype=torch.int32, device=indices.device)
-        _cpp_backend.invert_morton3D(indices.int(), num_coords, coords)
+        cpp_backend.invert_morton3D(indices.int(), num_coords, coords)
         return coords
 
 
@@ -79,7 +79,7 @@ class Packbits(Function):
         num_entries = num_cascades * H3 // 8 # num entries across all hashes
         if bitfield is None:
             bitfield = torch.empty(num_entries, dtype=torch.uint8, device=grid.device)
-        _cpp_backend.packbits(grid, num_entries, thresh, bitfield)
+        cpp_backend.packbits(grid, num_entries, thresh, bitfield)
         return bitfield
 
 
@@ -105,7 +105,7 @@ class RayIntersection(Function):
         num_rays = rays_o.shape[0]
         nears = torch.empty(num_rays, dtype=rays_o.dtype, device=rays_o.device)
         fars = torch.empty(num_rays, dtype=rays_o.dtype, device=rays_o.device)
-        _cpp_backend.ray_intersection(rays_o, rays_d, aabb, num_rays, min_near, nears, fars)
+        cpp_backend.ray_intersection(rays_o, rays_d, aabb, num_rays, min_near, nears, fars)
         return nears, fars
 
 
@@ -149,7 +149,7 @@ class RaymarchingTrainer(Function):
         step_counter = torch.zeros(2, dtype=torch.int32, device=rays_o.device) # point counter, ray counter
         #TODO: could add noise to rays
 
-        _cpp_backend.train_raymarching(
+        cpp_backend.train_raymarching(
             rays_o, 
             rays_d, 
             density_bitfield, 
@@ -194,7 +194,7 @@ class CompositeRayTrainer(Function):
         weights_sum = torch.empty(N, dtype=sigmas.dtype, device=sigmas.device)
         depth = torch.empty(N, dtype=sigmas.dtype, device=sigmas.device)
         image = torch.empty(N, 3, dtype=sigmas.dtype, device=sigmas.device)
-        _cpp_backend.train_composite_rays_forward(sigmas, rgbs, deltas, rays, max_points, num_rays, T_thresh, weights_sum, depth, image)
+        cpp_backend.train_composite_rays_forward(sigmas, rgbs, deltas, rays, max_points, num_rays, T_thresh, weights_sum, depth, image)
         ctx.save_for_backward(sigmas, rgbs, deltas, rays, weights_sum, depth, image)
         ctx.dims = [max_points, num_rays, T_thresh]
         return weights_sum, depth, image
@@ -208,7 +208,7 @@ class CompositeRayTrainer(Function):
         max_points, num_rays, T_thresh = ctx.dims
         grad_sigmas = torch.zeros_like(sigmas)
         grad_rgbs = torch.zeros_like(rgbs)
-        _cpp_backend.train_composite_rays_backward(grad_weights_sum, grad_image, sigmas, rgbs, deltas, rays, weights_sum, image, max_points, num_rays, T_thresh, grad_sigmas, grad_rgbs)
+        cpp_backend.train_composite_rays_backward(grad_weights_sum, grad_image, sigmas, rgbs, deltas, rays, weights_sum, image, max_points, num_rays, T_thresh, grad_sigmas, grad_rgbs)
         return grad_sigmas, grad_rgbs, None, None, None
 
 
@@ -245,7 +245,7 @@ class MarchRaysInference(Function):
         xyzs = torch.zeros(max_points, 3, dtype=rays_o.dtype, device=rays_o.device)
         dirs = torch.zeros(max_points, 3, dtype=rays_o.dtype, device=rays_o.device)
         deltas = torch.zeros(max_points, 2, dtype=rays_o.dtype, device=rays_o.device) # 2 vals, one for rgb, one for depth
-        _cpp_backend.march_rays(n_alive, n_step, rays_alive, rays_t, rays_o, rays_d, scale, dt_gamma, max_steps, num_cascades, grid_size, density_bitfield, near, far, xyzs, dirs, deltas)
+        cpp_backend.march_rays(n_alive, n_step, rays_alive, rays_t, rays_o, rays_d, scale, dt_gamma, max_steps, num_cascades, grid_size, density_bitfield, near, far, xyzs, dirs, deltas)
         return xyzs, dirs, deltas
 
 
@@ -267,6 +267,6 @@ class CompositeRaysInference(Function):
             depth: float, [N,], the depth value
             image: float, [N, 3], the RGB channel (after multiplying alpha!)
         '''
-        _cpp_backend.composite_rays(n_alive, n_step, T_thresh, rays_alive, rays_t, sigmas, rgbs, deltas, weights_sum, depth, image)
+        cpp_backend.composite_rays(n_alive, n_step, T_thresh, rays_alive, rays_t, sigmas, rgbs, deltas, weights_sum, depth, image)
         return tuple()
 

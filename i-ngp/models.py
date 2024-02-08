@@ -530,7 +530,6 @@ class INGP(NerfRenderer):
             {'params': self.xyz_encoder.parameters(), 'lr': lr},
             {'params': self.sigma_net.parameters(), 'lr': lr},
             {'params': self.dir_encoder.parameters(), 'lr': lr},
-            {'params': self.light_encoder.parameters(), 'lr': lr},
             {'params': self.rgb_net.parameters(), 'lr': lr}, 
         ]
         
