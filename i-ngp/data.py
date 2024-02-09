@@ -10,6 +10,7 @@ import torch.nn as nn
 import cv2
 import torch.distributed as distributed
 import imageio
+from torch.utils.data.distributed import DistributedSampler
 
 from metrics import PSNRMeter
 from utils import nerf_matrix_to_ngp, rand_poses, get_rays, linear_to_srgb, srgb_to_linear
@@ -32,7 +33,9 @@ class NerfDataset():
                  color_space="srgb",
                  patch_size=1, # [experimental] render patches in training, so as to apply LPIPS loss. 1 means disabled, use [64, 32, 16] to enable
                  type='train', # train, val, test
-                 n_test=10
+                 n_test=10,
+                 local_rank=0,
+                 world_size=1
                  ):
         # Use transform files to initialize dataset by matching poses to image names
 
@@ -48,6 +51,8 @@ class NerfDataset():
         self.error_map = error_map
         self.color_space = color_space
         self.patch_size = patch_size
+        self.local_rank = local_rank
+        self.world_size = world_size
 
         self.training = self.type in ['train', 'all', 'trainval']
         self.num_rays = num_rays if self.training else -1
@@ -171,6 +176,14 @@ class NerfDataset():
         cy = (transform['cy'] / downscale) if 'cy' in transform else (self.H / 2)
         self.intrinsics = np.array([fl_x, fl_y, cx, cy])
 
+
+    def __len__(self):
+        size = len(self.poses)
+        if self.training and self.rand_pose > 0:
+            size += size // self.rand_pose 
+        return size
+
+
     def collate(self, index):
         B = len(index) # a list of length 1
         if self.rand_pose == 0 or index[0] >= len(self.poses): # random pose without ground truth images
@@ -212,8 +225,9 @@ class NerfDataset():
     def dataloader(self):
         size = len(self.poses)
         if self.training and self.rand_pose > 0:
-            size += size // self.rand_pose # index >= size means we use random pose.
-        loader = DataLoader(list(range(size)), batch_size=1, collate_fn=self.collate, shuffle=self.training, num_workers=0)
+            size += size // self.rand_pose # index >= size means we use random pose
+        loader = DataLoader(list(range(size)), batch_size=1, collate_fn=self.collate, num_workers=0, sampler=DistributedSampler(self))
+        # loader = DataLoader(list(range(size)), batch_size=1, collate_fn=self.collate, shuffle=self.training, num_workers=0) # nondistributed
         loader._data = self # need to access error_map & poses in trainer
         loader.has_gt = self.images is not None
         return loader
@@ -235,7 +249,8 @@ class Trainer():
                  metrics=[PSNRMeter()], 
                  use_checkpoint="latest", 
                  eval_interval=50,
-                 local_rank=0 # device id if doing distributed training
+                 local_rank=0, # device id if doing distributed training
+                 world_size=1, # number of processes to use for distributed trainer, total num of gpus
                  ):
 
         self.experiment_name = experiment_name
@@ -251,11 +266,13 @@ class Trainer():
         self.use_checkpoint = use_checkpoint
         self.eval_interval = eval_interval
         self.local_rank = local_rank
+        self.world_size = world_size
+        self.color_space = color_space
 
-        #TODO: could do distributed training
-        # model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
-        model.to(self.device)
+        model.to(self.device) 
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank]) # TODO: maybe shouldnt do distributed training?
+
         if isinstance(criterion, nn.Module):
             criterion.to(device)
         self.model = model
@@ -269,6 +286,8 @@ class Trainer():
 
         # initialize other variables
         self.epoch = 0
+        self.local_step = 0
+        self.global_step = 0
         self.stats = {
             "loss": [],
             "valid_loss": [],
@@ -311,7 +330,7 @@ class Trainer():
 
         # distributedSampler: must call set_epoch() to shuffle indices across multiple epochs
         # ref: https://pytorch.org/docs/stable/data.html
-        train_loader.sampler.set_epoch(self.epoch) #TODO: might not need to do this due to small world size
+        # train_loader.sampler.set_epoch(self.epoch) #TODO: might not need to do this due to small world size
         pbar = tqdm(
             total=len(train_loader) * train_loader.batch_size, 
             bar_format='{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
@@ -319,9 +338,9 @@ class Trainer():
         self.local_step = 0
         for data in train_loader:
             # update grid every 16 steps
-            if self.model.cuda_ray_marching and self.global_step % 16 == 0:
+            if self.model.module.cuda_ray_marching and self.global_step % 16 == 0:
                 with torch.cuda.amp.autocast(enabled=self.fp16):
-                    self.model.update_extra_state()
+                    self.model.module.update_extra_state() # update state info for nerf apart from just member vars of class, so this includes hash grids, resolutions, etc
 
             self.local_step += 1
             self.global_step += 1
@@ -393,7 +412,7 @@ class Trainer():
 
                 # all_gather/reduce the statistics (NCCL only support all_*), basically mapreduce
                 if self.world_size > 1:
-                    distributed.all_reduce(loss, op=dist.ReduceOp.SUM)
+                    distributed.all_reduce(loss, op=distributed.ReduceOp.SUM)
                     loss = loss / self.world_size
                     
                     preds_list = [torch.zeros_like(preds).to(self.device) for _ in range(self.world_size)] # [[B, ...], [B, ...], ...]
@@ -461,7 +480,7 @@ class Trainer():
         if self.color_space == 'linear':
             images[..., :3] = srgb_to_linear(images[..., :3])
 
-        if C == 3 or self.model.bg_radius > 0:
+        if C == 3 or self.model.module.bg_radius > 0:
             bg_color = 1
         else: # train with random background color if not using a bg model and has alpha channel
             bg_color = torch.rand_like(images[..., :3]) # [N, 3], pixel-wise random.
@@ -471,7 +490,7 @@ class Trainer():
         else:
             gt_rgb = images
 
-        outputs = self.model.render(rays_o, rays_d)
+        outputs = self.model.module.render(rays_o, rays_d)
         pred_rgb = outputs['image']
         loss = self.criterion(pred_rgb, gt_rgb).mean(-1) # [B, N, 3] --> [B, N], mse loss
 
@@ -518,7 +537,7 @@ class Trainer():
             gt_rgb = images[..., :3] * images[..., 3:] + bg_color * (1 - images[..., 3:])
         else:
             gt_rgb = images
-        outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=False, **vars(self.opt))
+        outputs = self.model.module.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=False, **vars(self.opt))
         pred_rgb = outputs['image'].reshape(B, H, W, 3)
         pred_depth = outputs['depth'].reshape(B, H, W)
         loss = self.criterion(pred_rgb, gt_rgb).mean()
@@ -530,15 +549,15 @@ class Trainer():
         H, W = data['H'], data['W']
         if bg_color is not None:
             bg_color = bg_color.to(self.device)
-        outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, **vars(self.opt))
+        outputs = self.model.module.render(rays_o, rays_d, staged=True, bg_color=bg_color, **vars(self.opt))
         pred_rgb = outputs['image'].reshape(-1, H, W, 3)
         pred_depth = outputs['depth'].reshape(-1, H, W)
         return pred_rgb, pred_depth
 
     def train(self, train_loader, valid_loader, max_epochs):
         # mark untrained region (i.e., not covered by any camera from the training dataset)
-        if self.model.cuda_ray_marching:
-            self.model.mark_untrained_grid(train_loader._data.poses, train_loader._data.intrinsics)
+        if self.model.module.cuda_ray_marching:
+            self.model.module.mark_untrained_grid(train_loader._data.poses, train_loader._data.intrinsics)
 
         # get a ref to error_map
         self.error_map = train_loader._data.error_map

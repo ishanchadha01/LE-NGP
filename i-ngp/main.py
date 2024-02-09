@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import torch.distributed as distributed
 
 from models import INGP
 from metrics import PSNRMeter
@@ -7,6 +8,7 @@ from data import NerfDataset, Trainer
 
 
 def main(root_path):
+    distributed.init_process_group(backend='nccl', rank=0, world_size=1)  # Use 'nccl' as the backend if you're using GPUs, rank is local rank so 0, world size is num GPUs
     model = INGP()
     print(model)
     criterion = torch.nn.MSELoss(reduction='none')
@@ -15,8 +17,9 @@ def main(root_path):
     iters = 1e4
 
     # Training
-    optimizer = lambda model: torch.optim.Adam(model.get_params(lr), betas=(0.9, 0.99), eps=1e-15)
+    optimizer = lambda model: torch.optim.Adam(model.module.get_params(lr), betas=(0.9, 0.99), eps=1e-15)
     train_loader = NerfDataset(device=device, type='train', path=root_path).dataloader()
+    # train_loader = DataLoader(device=device, type='train', path='root_path') # TODO: make dataloader in a better way, current way is kinda dumb
 
     # decay to 0.1 * init_lr at last iter step
     scheduler = lambda optimizer: torch.optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / iters, 1))

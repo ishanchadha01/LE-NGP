@@ -12,17 +12,20 @@ class NerfRenderer(nn.Module):
     def __init__(self,
                  grid_size=128,
                  scale=1, # bounding box bounds for xyz/dir 
+                 density_scale=1, # scale up deltas (or sigmas), to make the density grid more sharp. larger value than 1 usually improves performance.
                  cuda_ray_marching=True,
                  density_threshold=0.01,
                  min_near=0.2 # lower bound for starting point for ray marching from ray origin
                  ):
         super().__init__()
         self.scale = scale
+        self.density_scale = density_scale
         # TODO: this is fine for testing, but there should be scale>1 or else only 1 cascade=1 resolution
         self.cascades = int(1 + np.ceil(np.log2(self.scale))) # power of 2 range, eg self.scale=8 gives 4 cascades, [1,2,4,8]
         self.grid_size = grid_size
         self.cuda_ray_marching = cuda_ray_marching
         self.density_threshold = density_threshold
+        self.min_near = min_near
 
         # create axis-aligned bounding box (xmin, xmax, ymin, ymax, zmin, zmax)
         aabb = torch.tensor([-1, 1, -1, 1, -1, 1])
@@ -34,7 +37,7 @@ class NerfRenderer(nn.Module):
             # create cascade of grids at multiple resolutions
             # voxel grid essentially 128x128x128 at each of cascade resolutions
             density_grid = torch.zeros((self.cascades, self.grid_size ** 3))
-            density_bitfield = torch.zeros((self.cascades * self.grid_size**3 // 8)) # store it more efficiently
+            density_bitfield = torch.zeros((self.cascades * self.grid_size**3 // 8), dtype=torch.uint8) # store it more efficiently
             self.register_buffer("density_grid", density_grid)
             self.register_buffer("density_bitfield", density_bitfield)
             self.num_iters_density_update = 0 # perform full update of density if its still first couple iters
@@ -56,7 +59,7 @@ class NerfRenderer(nn.Module):
         if not self.cuda_ray_marching:
             return
         # update density grid
-        temp_grid = -1 * torch.ones(self.density_grid.shape)
+        temp_grid = -1 * torch.ones(self.density_grid.shape, device=self.density_bitfield.device)
         
         # if less than 16 iters have passed, then do full update, otherwise do partial update
         if self.num_iters_density_update < 16:
@@ -76,7 +79,7 @@ class NerfRenderer(nn.Module):
                         xyzs = 2 * coords.float() / (self.grid_size - 1) - 1 # [num_coords, 3], change range of xyz to [-1, 1]
 
                         # cascading at multiple resolutions
-                        for cascade in self.cascades:
+                        for cascade in range(self.cascades):
                             scale = min(self.scale, 2**cascade)
                             half_grid_size = self.scale / self.grid_size
                             cascade_xyzs = xyzs * (scale - half_grid_size) # scale to current cascades resolution
@@ -90,7 +93,7 @@ class NerfRenderer(nn.Module):
         else:
             # partial update
             num_coords = self.grid_size ** 3 // 4 # grid_size**3 / 4
-            for cascade in self.cascades:
+            for cascade in range(self.cascades):
                 # randomly sample few positions
                 coords = torch.randint(0, self.grid_size, (num_coords, 3), device=self.density_bitfield.device) # [num_coords, 3], in [0, 128)
                 indices = Morton3D.apply(coords).long() # [num_coords]
@@ -314,21 +317,17 @@ class NerfRenderer(nn.Module):
 
         results = {}
         if self.training:
-            # setup counter
-            counter = self.step_counter[self.local_step % 16]
-            counter.zero_() # set to 0
-
-            xyzs, dirs, deltas, rays = RaymarchingTrainer(
+            xyzs, dirs, deltas, rays = RaymarchingTrainer.apply(
                 rays_o, 
                 rays_d, 
-                scale=self.scale, 
-                density_bitfield=self.density_bitfield, 
-                num_cascades=self.cascades, 
-                grid_size=self.grid_size, 
-                nears=nears, 
-                fars=fars,
-                dt_gamma=dt_gamma, 
-                max_steps=max_steps
+                self.scale, 
+                self.density_bitfield, 
+                self.cascades, 
+                self.grid_size, 
+                nears, 
+                fars,
+                dt_gamma, 
+                max_steps
             )
 
             sigmas, rgbs = self(xyzs, dirs)
@@ -385,7 +384,7 @@ class NerfRenderer(nn.Module):
                     max_steps
                 )
                 sigmas, rgbs = self(xyzs, dirs)
-                sigmas = self.density_scale * sigmas
+                sigmas *= self.density_scale
 
                 CompositeRaysInference(
                     n_alive, 
@@ -487,7 +486,7 @@ class INGP(NerfRenderer):
         """
 
         # Compute densities from sigma net
-        x = (x-self.xyz_min)/(self.xyz_max-self.xyz_min) # change range from [-scale, scale] to [0, scale]
+        x = (x+self.scale)/(2*self.scale) # change range from [-scale, scale] to [0, scale]
         x = self.xyz_encoder(x)
         h = self.sigma_net(x)
         sigmas = TruncExp.apply(h[:, 0])
@@ -497,7 +496,9 @@ class INGP(NerfRenderer):
         d = d/torch.norm(d, dim=1, keepdim=True) # normalize direction
         d = self.dir_encoder((d+1)/2) # changes range from [-1, 1] to [0, 1]
         h = torch.cat([d, geometric_features], dim=-1)
-        h = self.color_net(h)
+        print(sigmas.shape, d.shape, geometric_features.shape)
+        print(h.shape)
+        h = self.rgb_net(h)
         rgbs = torch.sigmoid(h) # sigmoid activation for rgb
 
         return sigmas, rgbs
@@ -512,7 +513,7 @@ class INGP(NerfRenderer):
         """
 
         # Compute densities from sigma net
-        x = (x-self.xyz_min)/(self.xyz_max-self.xyz_min) # change range from [-scale, scale] to [0, scale]
+        x = (x+self.scale)/(2*self.scale) # change range from [-scale, scale] to [0, scale]
         x = self.xyz_encoder(x)
         h = self.sigma_net(x)
         sigmas = TruncExp.apply(h[:, 0])
@@ -621,7 +622,7 @@ class LENGP(NerfRenderer):
         #TODO edit this to include light
 
         # Compute densities from sigma net
-        x = (x-self.xyz_min)/(self.xyz_max-self.xyz_min) # change range from [-scale, scale] to [0, scale]
+        x = (x+self.scale)/(2*self.scale) # change range from [-scale, scale] to [0, scale]
         x = self.xyz_encoder(x)
         h = self.sigma_net(x)
         sigmas = TruncExp.apply(h[:, 0])
@@ -631,7 +632,7 @@ class LENGP(NerfRenderer):
         d = d/torch.norm(d, dim=1, keepdim=True) # normalize direction
         d = self.dir_encoder((d+1)/2) # changes range from [-1, 1] to [0, 1]
         h = torch.cat([d, geometric_features], dim=-1)
-        h = self.color_net(h)
+        h = self.rgb_net(h)
         rgbs = torch.sigmoid(h) # sigmoid activation for rgb
 
         return sigmas, rgbs
@@ -647,7 +648,7 @@ class LENGP(NerfRenderer):
         """
 
         # Compute densities from sigma net
-        x = (x-self.xyz_min)/(self.xyz_max-self.xyz_min) # change range from [-scale, scale] to [0, scale]
+        x = (x+self.scale)/(2*self.scale) # change range from [-scale, scale] to [0, scale]
         x = self.xyz_encoder(x)
         h = self.sigma_net(x)
         sigmas = TruncExp.apply(h[:, 0])

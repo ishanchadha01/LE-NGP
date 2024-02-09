@@ -86,7 +86,7 @@ class Packbits(Function):
 class RayIntersection(Function):
     @staticmethod
     @custom_fwd(cast_inputs=torch.float32)
-    def forward(ctx, rays_o, rays_d, aabb, min_near=0.2):
+    def forward(ctx, rays_o, rays_d, aabb, min_near):
         ''' 
         Find near and far bounds of ray intersection with aabb, cuda impl
         Args:
@@ -105,6 +105,7 @@ class RayIntersection(Function):
         num_rays = rays_o.shape[0]
         nears = torch.empty(num_rays, dtype=rays_o.dtype, device=rays_o.device)
         fars = torch.empty(num_rays, dtype=rays_o.dtype, device=rays_o.device)
+        aabb = aabb.to(dtype=torch.float32)
         cpp_backend.ray_intersection(rays_o, rays_d, aabb, num_rays, min_near, nears, fars)
         return nears, fars
 
