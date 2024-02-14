@@ -53,8 +53,8 @@ class LightLocEncodedRGB(NeuralRGB):
     def build_mlp(self, cfg_mlp, input_dim=6): #input dim is 6 bc we pass in light pos now too
         super().build_mlp(cfg_mlp, input_dim)
 
-    def forward(self, points_3D, normals, rays_unit, feats, app):
-        view_enc = self.encode_view(rays_unit)  # [...,LD]
+    def forward(self, points_3D, normals, rays_unit, center, feats, app):
+        view_enc = self.encode_view(rays_unit, center)  # [...,LD]
         input_list = [points_3D, view_enc, normals, feats]
         if app is not None:
             input_list.append(app)
@@ -66,7 +66,7 @@ class LightLocEncodedRGB(NeuralRGB):
         rgb = self.mlp(input_vec).sigmoid_()
         return rgb  # [...,3]
 
-    def encode_view(self, rays_unit):
+    def encode_view(self, rays_unit, center):
         if self.cfg_rgb.dir_encoding_view.type == "fourier":
             view_enc = nerf_util.positional_encoding(rays_unit, num_freq_bases=self.cfg_rgb.dir_encoding_view.levels)
         elif self.cfg_rgb.dir_encoding_view.type == "spherical":
@@ -74,11 +74,14 @@ class LightLocEncodedRGB(NeuralRGB):
         else:
             raise NotImplementedError("Unknown encoding type")
         
+        # rays is in [B,R,N,3], so broadcast center from [3] to [B,3]
+        B = rays_unit.shape[0]
+        center_batched = center.unsqueeze(0).expand(B, 01)
         if self.cfg_rgb.lightloc_encoding_view.type == "fourier":
-            view_enc_light = nerf_util.positional_encoding(rays_unit, num_freq_bases=self.cfg_rgb.lightloc_encoding_view.levels)
+            view_enc_light = nerf_util.positional_encoding(center_batched, num_freq_bases=self.cfg_rgb.lightloc_encoding_view.levels)
             view_enc = torch.cat((view_enc, view_enc_light), dim=-1) # concat along last dim
         elif self.cfg_rgb.lightloc_encoding_view.type == "spherical":
-            view_enc_light = self.spherical_harmonic_encoding(rays_unit)
+            view_enc_light = self.spherical_harmonic_encoding(center_batched)
             view_enc = torch.cat((view_enc, view_enc_light), dim=-1) # concat along last dim
         else:
             raise NotImplementedError("Unknown encoding type")

@@ -56,7 +56,7 @@ class Model(BaseModel):
         else:
             self.appear_embed = self.appear_embed_outside = None
         self.neural_sdf = NeuralSDF(cfg_model.object.sdf)
-        self.neural_rgb = LightLocEncodedRGB(cfg_model.object.rgb, feat_dim=cfg_model.object.sdf.mlp.hidden_dim,
+        self.le_rgb = LightLocEncodedRGB(cfg_model.object.rgb, feat_dim=cfg_model.object.sdf.mlp.hidden_dim,
                                     appear_embed=cfg_model.appear_embed)
         if cfg_model.background.enabled:
             self.background_nerf = BackgroundNeRF(cfg_model.background, appear_embed=cfg_model.appear_embed)
@@ -166,7 +166,7 @@ class Model(BaseModel):
         rays_unit = ray_unit[..., None, :].expand_as(points).contiguous()  # [B,R,N,3]
         gradients, hessians = self.neural_sdf.compute_gradients(points, training=self.training, sdf=sdfs)
         normals = torch_F.normalize(gradients, dim=-1)  # [B,R,N,3]
-        rgbs = self.neural_rgb.forward(points, normals, rays_unit, feats, app=app)  # [B,R,N,3]
+        rgbs = self.le_rgb.forward(points, normals, rays_unit, center, feats, app=app)  # [B,R,N,3]
         # SDF volume rendering.
         alphas = self.compute_neus_alphas(ray_unit, sdfs, gradients, dists, dist_far=far[..., None],
                                           progress=self.progress)  # [B,R,N]
