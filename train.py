@@ -25,7 +25,7 @@ from imaginaire.utils.set_random_seed import set_random_seed
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Training')
-    parser.add_argument('--config', help='Path to the training config file.', default='/storage/home/hcoda1/3/ichadha3/p-ychen3538-0/ishan/neuralangelo/projects/neuralangelo/configs/custom/ct1a.yaml')
+    parser.add_argument('--config', help='Path to the training config file.', default='/storage/home/hcoda1/3/ichadha3/p-ychen3538-0/ishan/le-ngp/projects/le_ngp/configs/custom/ct1a.yaml')
     parser.add_argument('--logdir', help='Dir for saving logs and models.', default=None)
     parser.add_argument('--checkpoint', default=None, help='Checkpoint path.')
     parser.add_argument('--seed', type=int, default=0, help='Random seed.')

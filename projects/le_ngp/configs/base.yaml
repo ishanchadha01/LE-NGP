@@ -36,7 +36,7 @@ trainer:
     depth_vis_scale: 0.5
 
 model:
-    type: projects.le-ngp.model
+    type: projects.le_ngp.model
     object:
         sdf:
             mlp:
