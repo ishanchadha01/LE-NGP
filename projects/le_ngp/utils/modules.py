@@ -78,16 +78,17 @@ class LightLocEncodedRGB(torch.nn.Module):
         else:
             raise NotImplementedError("Unknown encoding type")
         
-        # rays is in [B,R,N,3], center is [B,R,3], so we add dim
-        N = rays_unit.shape[2]
-        center = center.unsqueeze(2).repeat(1,1,N,1) #TODO: this is doubling size of input, instead we could just make 3rd dim N+1
+        # rays is in [B,R,N,3], center is [B,R,3], so we expand to [B,R,N,3]
+        center = center.unsqueeze(2)
         if self.cfg_rgb.lightloc_encoding_view.type == "fourier":
             view_enc_light = nerf_util.positional_encoding(center, num_freq_bases=self.cfg_rgb.lightloc_encoding_view.levels)
+            view_enc_light = view_enc_light.expand_as(view_enc)
             view_enc = torch.cat((view_enc, view_enc_light), dim=-1) # concat along last dim
         elif self.cfg_rgb.lightloc_encoding_view.type == "spherical":
             view_enc_light = self.spherical_harmonic_encoding(center)
+            view_enc_light = view_enc_light.expand_as(view_enc)
             view_enc = torch.cat((view_enc, view_enc_light), dim=-1) # concat along last dim
         else:
             raise NotImplementedError("Unknown encoding type")
         
-        return view_enc
+        return view_enc # [B,R,N,6] since for each sampled point we're adding light source loc info

@@ -85,32 +85,32 @@ model:
             init_val: 3.
             anneal_end: 0.1
     background:
-        enabled: True
+        enabled: False
         white: False
-        mlp:
-            num_layers: 8
-            hidden_dim: 256
-            skip: [4]
-            num_layers_rgb: 2
-            hidden_dim_rgb: 128
-            skip_rgb: []
-            activ: relu
-            activ_params: {}
-            activ_density: softplus
-            activ_density_params: {}
-        view_dep: True
-        encoding:
-            type: fourier
-            levels: 10
-        encoding_view:
-            type: spherical
-            levels: 3
+        # mlp:
+        #     num_layers: 8
+        #     hidden_dim: 256
+        #     skip: [4]
+        #     num_layers_rgb: 2
+        #     hidden_dim_rgb: 128
+        #     skip_rgb: []
+        #     activ: relu
+        #     activ_params: {}
+        #     activ_density: softplus
+        #     activ_density_params: {}
+        # view_dep: True
+        # encoding:
+        #     type: fourier
+        #     levels: 10
+        # encoding_view:
+        #     type: spherical
+        #     levels: 3
     render:
         rand_rays: 512
         num_samples:
             coarse: 64
             fine: 16
-            background: 32
+            # background: 32
         num_sample_hierarchy: 4
         stratified: True
     appear_embed:
