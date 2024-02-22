@@ -56,8 +56,8 @@ model:
                 hashgrid:
                     min_logres: 5
                     max_logres: 11
-                    dict_size: 21
-                    dim: 8
+                    dict_size: 12
+                    dim: 4
                     range: [-2,2]
                 coarse2fine:
                     enabled: True
@@ -111,7 +111,7 @@ model:
         num_sample_hierarchy: 4
         stratified: True
     appear_embed:
-        enabled: True
+        enabled: false
         dim: 8
 
 optim:
@@ -132,15 +132,15 @@ data:
     use_multi_epoch_loader: True
     num_workers: 4
     preload: True
-    num_images: 275 # The number of training images.
+    num_images: 276 # The number of training images.
     train:
         image_size: [800,800]
-        batch_size: 2
+        batch_size: 1
         subset:
     val:
         image_size: [400,400]
-        batch_size: 2
-        subset: 4
+        batch_size: 1
+        subset: 1
         max_viz_samples: 16
     readjust:
         center: [0.,0.,0.]

@@ -216,7 +216,7 @@ class NeuralRGB(torch.nn.Module):
         if self.cfg_rgb.mode == "no_normal":
             input_list.remove(normals)
         input_vec = torch.cat(input_list, dim=-1)
-        rgb = self.mlp(input_vec).sigmoid_()
+        rgb = self.mlp(input_vec).sigmoid_() #TODO: add another branch which computes albedo/reduce size of this mlp
         return rgb  # [...,3]
 
     def encode_view(self, rays_unit):

@@ -21,7 +21,7 @@ checkpoint:
     save_iter: 20000
 
 trainer:
-    type: projects.neuralangelo.trainer
+    type: projects.splatting.splatter.trainer
     ema_config:
         enabled: False
         load_ema_checkpoint: False
@@ -36,7 +36,7 @@ trainer:
     depth_vis_scale: 0.5
 
 model:
-    type: projects.neuralangelo.model
+    type: projects.splatting.splatter.model
     object:
         sdf:
             mlp:
@@ -56,8 +56,8 @@ model:
                 hashgrid:
                     min_logres: 5
                     max_logres: 11
-                    dict_size: 22
-                    dim: 8
+                    dict_size: 12
+                    dim: 4
                     range: [-2,2]
                 coarse2fine:
                     enabled: True
@@ -82,36 +82,36 @@ model:
             init_val: 3.
             anneal_end: 0.1
     background:
-        enabled: False
+        enabled: True
         white: False
-        # mlp:
-        #     num_layers: 8
-        #     hidden_dim: 256
-        #     skip: [4]
-        #     num_layers_rgb: 2
-        #     hidden_dim_rgb: 128
-        #     skip_rgb: []
-        #     activ: relu
-        #     activ_params: {}
-        #     activ_density: softplus
-        #     activ_density_params: {}
-        # view_dep: True
-        # encoding:
-        #     type: fourier
-        #     levels: 10
-        # encoding_view:
-        #     type: spherical
-        #     levels: 3
+        mlp:
+            num_layers: 8
+            hidden_dim: 256
+            skip: [4]
+            num_layers_rgb: 2
+            hidden_dim_rgb: 128
+            skip_rgb: []
+            activ: relu
+            activ_params: {}
+            activ_density: softplus
+            activ_density_params: {}
+        view_dep: True
+        encoding:
+            type: fourier
+            levels: 10
+        encoding_view:
+            type: spherical
+            levels: 3
     render:
         rand_rays: 512
         num_samples:
             coarse: 64
             fine: 16
-            # background: 32
+            background: 32
         num_sample_hierarchy: 4
         stratified: True
     appear_embed:
-        enabled: False
+        enabled: false
         dim: 8
 
 optim:
@@ -132,15 +132,15 @@ data:
     use_multi_epoch_loader: True
     num_workers: 4
     preload: True
-    num_images: 275 # The number of training images.
+    num_images: 276 # The number of training images.
     train:
         image_size: [800,800]
-        batch_size: 2
+        batch_size: 1
         subset:
     val:
         image_size: [400,400]
-        batch_size: 2
-        subset: 4
+        batch_size: 1
+        subset: 1
         max_viz_samples: 16
     readjust:
         center: [0.,0.,0.]
