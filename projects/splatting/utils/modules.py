@@ -309,3 +309,7 @@ class BackgroundNeRF(torch.nn.Module):
         else:
             raise NotImplementedError("Unknown encoding type")
         return view_enc
+
+
+class GaussianSplatter(torch.nn.Module):
+    

@@ -1,0 +1,35 @@
+
+Main
+    run Hasher
+    pick between Neuralangelo and Splatter
+
+
+Hasher: ROS Node
+    sub to wandb for sdf
+    run sdf
+    pub to points
+
+Nueralangelo: ROS Node
+    sub to images
+    while img_bugger isnt full, spin
+    run Neuralangelo model training epoch
+    pub to wandb for sdf, rgb
+
+Splatter: ROS Node
+    sub to wandb for sdf, points
+    run neural_sdf + splatting
+    pub to wandb for sdf, rgb
+
+
+TODO:
+- document every major function call in neuralangelo currently
+- same for 4dgs
+- get rid of configs and setup and function calls that relate to rgb, but document what input and output need to be
+- do same thing for sdf
+- get point cloud output from neural_sdf and convert to colmap
+- get sampled input to neural_rgb
+2 models:
+- 4dgs, where backprop needs to occur all the way through
+- ceres for intensity+intrinsics+extrinsics->depth, which is sampled before being passed into rgb
+- write out both methods in related works
+- unit tests for each function
